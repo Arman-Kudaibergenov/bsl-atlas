@@ -24,12 +24,12 @@ MCP-сервер для 1С:Предприятие — векторный пои
 
 Укажите пустую папку, например `C:\my-config\`. После выгрузки появятся сотни XML-файлов и `.bsl`-модулей.
 
-### 2. Клонировать и настроить
+### 2. Скачать конфиг и настроить
 
 ```bash
-git clone https://github.com/your-username/bsl-atlas.git
-cd bsl-atlas
-cp .env.example .env
+curl -O https://raw.githubusercontent.com/Arman-Kudaibergenov/bsl-atlas/master/docker-compose.yml
+curl -O https://raw.githubusercontent.com/Arman-Kudaibergenov/bsl-atlas/master/.env.example
+mv .env.example .env
 ```
 
 Отредактировать `.env`:
