@@ -1,8 +1,8 @@
 services:
-  1c-codemetadata:
+  bsl-atlas:
     build: .
-    image: 1c-codemetadata:latest
-    container_name: 1c-codemetadata
+    image: bsl-atlas:latest
+    container_name: bsl-atlas
     ports:
       - "${MCP_PORT:-8000}:8000"
     volumes:

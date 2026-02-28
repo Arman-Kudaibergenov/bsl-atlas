@@ -1,6 +1,6 @@
-# 1C Codemetadata MCP Server
+# BSL Atlas
 
-MCP server for structural and semantic search across 1C:Enterprise codebase. Gives AI assistants instant access to your configuration: find functions, trace call graphs, search by metadata object names, and run semantic queries over BSL code — all without reading raw files.
+MCP server for 1C:Enterprise codebase — vector search, structural index, and call graphs in one place. Gives AI assistants instant access to your configuration: find functions, trace what calls what, search metadata objects, and run semantic queries over BSL code — all without reading raw files.
 
 ## What it does
 

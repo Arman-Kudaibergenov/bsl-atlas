@@ -1,7 +1,7 @@
 [project]
-name = "1c-codemetadata"
+name = "bsl-atlas"
 version = "1.0.0"
-description = "MCP server for 1C codebase structural and semantic search"
+description = "MCP server for 1C/BSL codebase: vector search, structural index, call graphs"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "MIT"}
@@ -35,7 +35,7 @@ local = [
 ]
 
 [project.scripts]
-1c-codemetadata = "src.main:main"
+bsl-atlas = "src.main:main"
 
 [build-system]
 requires = ["hatchling"]
