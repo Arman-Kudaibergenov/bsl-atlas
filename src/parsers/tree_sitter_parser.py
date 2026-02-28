@@ -28,10 +28,15 @@ def _init() -> bool:
             logger.debug(f"tree-sitter-bsl library not found at {_LIB_PATH} — using regex fallback")
             return False
 
+        import warnings
         lib = ctypes.cdll.LoadLibrary(str(_LIB_PATH))
         fn = lib.tree_sitter_bsl
         fn.restype = ctypes.c_void_p
-        _language = Language(fn())
+        # Language(int) is deprecated in tree-sitter >= 0.22; capsule API requires
+        # a pip-installable binding which alkoleft/tree-sitter-bsl doesn't provide yet.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            _language = Language(fn())
         _parser = Parser(_language)
         _available = True
         logger.info("tree-sitter-bsl initialized — precise AST parsing enabled")
