@@ -1,58 +1,58 @@
 # BSL Atlas
 
-MCP server for 1C:Enterprise codebase — vector search, structural index, and call graphs in one place. Gives AI assistants instant access to your configuration: find functions, trace what calls what, search metadata objects, and run semantic queries over BSL code — all without reading raw files.
+MCP-сервер для 1С:Предприятие — векторный поиск, структурный индекс и граф вызовов в одном инструменте. Даёт AI-ассистентам мгновенный доступ к вашей конфигурации: находит функции, строит граф вызовов, ищет объекты метаданных и выполняет семантические запросы по BSL-коду — без чтения сырых файлов.
 
-## What it does
+## Что умеет
 
-- **Structural search** (SQLite + FTS5, instant): find functions by name, list all procedures in a module, trace what calls what, search metadata objects (catalogs, documents, registers, etc.)
-- **Semantic search** (ChromaDB, vector): find code by description — "how posting is implemented", "where error logging happens"
-- **Dual-layer**: SQLite rebuilds in seconds on startup; ChromaDB indexes once in the background via your embedding provider of choice
+- **Структурный поиск** (SQLite + FTS5, мгновенно): поиск функций по имени, список процедур модуля, граф вызовов (что вызывает что), поиск объектов метаданных (справочники, документы, регистры и др.)
+- **Семантический поиск** (ChromaDB, векторный): найти код по описанию — "как реализовано проведение", "где логируются ошибки"
+- **Два слоя**: SQLite пересобирается за секунды при старте; ChromaDB индексируется один раз в фоне через провайдер эмбеддингов на ваш выбор
 
-## Prerequisites
+## Что нужно
 
 - Docker + Docker Compose
-- 1C:Enterprise 8.3 (Configurator to export the config)
-- OpenRouter API key — [get one free](https://openrouter.ai/keys)
+- 1С:Предприятие 8.3 (Конфигуратор для выгрузки конфигурации)
+- API-ключ OpenRouter — [получить бесплатно](https://openrouter.ai/keys)
 
-## Quick start
+## Быстрый старт
 
-### 1. Export your 1C configuration
+### 1. Выгрузить конфигурацию
 
-In 1C Configurator: **Configuration → Dump config to files (Выгрузить конфигурацию в файлы)**
+В Конфигураторе: **Конфигурация → Выгрузить конфигурацию в файлы**
 
-Choose an empty directory, e.g. `C:\my-config\cf\`. After export you'll have hundreds of XML files and `.bsl` modules.
+Укажите пустую папку, например `C:\my-config\`. После выгрузки появятся сотни XML-файлов и `.bsl`-модулей.
 
-### 2. Clone and configure
+### 2. Клонировать и настроить
 
 ```bash
-git clone https://github.com/your-username/1c-codemetadata.git
-cd 1c-codemetadata
+git clone https://github.com/your-username/bsl-atlas.git
+cd bsl-atlas
 cp .env.example .env
 ```
 
-Edit `.env`:
+Отредактировать `.env`:
 
 ```env
-SOURCE_PATH=C:\my-config     # path to the directory containing cf/ subdir
+SOURCE_PATH=C:\my-config     # папка с выгрузкой (содержит cf/)
 OPENROUTER_API_KEY=sk-or-v1-...
 ```
 
-### 3. Start
+### 3. Запустить
 
 ```bash
 docker compose up -d
 ```
 
-First start takes 2–5 minutes: SQLite indexes immediately, ChromaDB vectorizes in the background (progress at `http://localhost:8000/health`).
+Первый запуск занимает 2-5 минут: SQLite индексируется сразу, ChromaDB векторизует в фоне (прогресс: `http://localhost:8000/health`).
 
-### 4. Connect to Claude
+### 4. Подключить к Claude
 
-**Claude Desktop** — add to `claude_desktop_config.json`:
+**Claude Desktop** — добавить в `claude_desktop_config.json`:
 
 ```json
 {
   "mcpServers": {
-    "1c-codemetadata": {
+    "bsl-atlas": {
       "type": "http",
       "url": "http://localhost:8000/mcp"
     }
@@ -60,16 +60,16 @@ First start takes 2–5 minutes: SQLite indexes immediately, ChromaDB vectorizes
 }
 ```
 
-Config file location:
+Расположение файла:
 - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
 - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
 
-**Claude Code** — add to `.mcp.json` in your project root:
+**Claude Code** — добавить в `.mcp.json` в корне проекта:
 
 ```json
 {
   "mcpServers": {
-    "1c-codemetadata": {
+    "bsl-atlas": {
       "type": "http",
       "url": "http://localhost:8000/mcp"
     }
@@ -79,103 +79,102 @@ Config file location:
 
 ---
 
-## Available MCP tools
+## Инструменты MCP
 
-### Structural (SQLite — instant)
+### Структурные (SQLite — мгновенно)
 
-| Tool | What it does |
-|------|-------------|
-| `search_function(name)` | Find function/procedure by name across all modules |
-| `get_module_functions(path)` | List all procedures/functions in a module |
-| `get_function_context(name)` | Call graph: what this function calls and who calls it |
-| `metadatasearch(query)` | Full-text search across metadata objects |
-| `get_object_details(full_name)` | Attributes, tabular sections, register dimensions for an object |
+| Инструмент | Что делает |
+|-----------|-----------|
+| `search_function(name)` | Найти функцию/процедуру по имени во всех модулях |
+| `get_module_functions(path)` | Список всех процедур/функций модуля |
+| `get_function_context(name)` | Граф вызовов: что вызывает функция и кто вызывает её |
+| `metadatasearch(query)` | Полнотекстовый поиск по объектам метаданных |
+| `get_object_details(full_name)` | Реквизиты, табличные части, измерения регистра |
 
-### Semantic (ChromaDB — vector)
+### Семантические (ChromaDB — векторный поиск)
 
-| Tool | What it does |
-|------|-------------|
-| `codesearch(query)` | Find code by natural language description |
-| `helpsearch(query)` | Search indexed help content |
-| `search_code_filtered(query, object_type)` | Filtered vector search (e.g. only Documents) |
+| Инструмент | Что делает |
+|-----------|-----------|
+| `codesearch(query)` | Поиск кода по описанию на естественном языке |
+| `helpsearch(query)` | Поиск по проиндексированной справке |
+| `search_code_filtered(query, object_type)` | Векторный поиск с фильтром (например, только Документы) |
 
-### Utility
+### Утилиты
 
-| Tool | What it does |
-|------|-------------|
-| `reindex(force_chromadb)` | Rebuild indexes after config changes |
-| `stats()` | Index statistics: object count, function count, etc. |
+| Инструмент | Что делает |
+|-----------|-----------|
+| `reindex(force_chromadb)` | Перестроить индексы после изменений конфигурации |
+| `stats()` | Статистика индекса: количество объектов, функций и др. |
 
 ---
 
-## Configuration
+## Настройка
 
-All settings via environment variables (set in `.env`):
+Все параметры задаются через переменные окружения в `.env`.
 
-### Embedding providers
+### Провайдеры эмбеддингов
 
-The server uses three separate providers for different operations — you can mix and match:
+Сервер использует три отдельных провайдера — можно комбинировать:
 
-| Variable | Used for | Default |
-|----------|----------|---------|
-| `INDEXING_PROVIDER` | Initial ChromaDB bulk fill (runs once) | `openrouter` |
-| `SEARCH_PROVIDER` | Every search query | `openrouter` |
-| `REINDEX_PROVIDER` | Incremental reindex after code changes | `openrouter` |
+| Переменная | Используется для | По умолчанию |
+|-----------|-----------------|-------------|
+| `INDEXING_PROVIDER` | Первоначальное заполнение ChromaDB (один раз) | `openrouter` |
+| `SEARCH_PROVIDER` | Каждый поисковый запрос | `openrouter` |
+| `REINDEX_PROVIDER` | Переиндексация после изменений кода | `openrouter` |
 
-Supported values: `openrouter`, `openai`, `ollama`, `cohere`, `jina`
+Поддерживаемые значения: `openrouter`, `openai`, `ollama`, `cohere`, `jina`
 
-### Hybrid setup (recommended if you have Ollama)
+### Гибридная схема (рекомендуется если есть Ollama)
 
-If you run Ollama locally, you can make search and reindex free — only the initial indexing uses cloud API:
+Если у вас запущен Ollama локально — поиск и переиндексация становятся бесплатными, облако используется только для первоначальной индексации:
 
 ```env
-INDEXING_PROVIDER=openrouter    # cloud, fast, parallel — used once
-SEARCH_PROVIDER=ollama          # free local inference for every query
-REINDEX_PROVIDER=ollama         # free local inference for reindex
+INDEXING_PROVIDER=openrouter    # облако, быстро, параллельно — один раз
+SEARCH_PROVIDER=ollama          # бесплатный локальный инференс для каждого запроса
+REINDEX_PROVIDER=ollama         # бесплатный локальный инференс для переиндексации
 
 OLLAMA_BASE_URL=http://host.docker.internal:11434
-OLLAMA_MODEL=qwen3-embedding:8b  # best for Russian/BSL
+OLLAMA_MODEL=qwen3-embedding:8b  # лучшая модель для русского/BSL
 ```
 
-`qwen3-embedding:8b` requires ~5 GB RAM. Pull it: `ollama pull qwen3-embedding:8b`
+`qwen3-embedding:8b` требует ~5 ГБ RAM. Скачать: `ollama pull qwen3-embedding:8b`
 
-### OpenRouter model
+### Модель OpenRouter
 
-Default is `qwen/qwen3-embedding-8b` — optimized for Russian and Cyrillic code. Override:
+По умолчанию используется `qwen/qwen3-embedding-8b` — оптимизирована для русского языка и кириллического кода. Переопределить:
 
 ```env
 EMBEDDING_MODEL=openai/text-embedding-3-small
 ```
 
-### Indexing settings
+### Параметры индексации
 
 ```env
-AUTO_INDEX=true              # rebuild SQLite index on every startup
-CHROMADB_AUTO_INDEX=true     # vectorize on first start; set false afterwards
-EMBEDDING_CONCURRENCY=5      # parallel embedding requests (5 = safe, 10 = faster)
-EMBEDDING_BATCH_SIZE=10      # texts per API request
+AUTO_INDEX=true              # пересобирать SQLite при каждом старте
+CHROMADB_AUTO_INDEX=true     # векторизовать при первом запуске; после — false
+EMBEDDING_CONCURRENCY=5      # параллельные запросы к API (5 — безопасно, 10 — быстрее)
+EMBEDDING_BATCH_SIZE=10      # текстов в одном запросе к API
 ```
 
-> **After the first run** set `CHROMADB_AUTO_INDEX=false` — the vector index persists in `chroma_db/` and only needs updating when your config changes.
+> **После первого запуска** установите `CHROMADB_AUTO_INDEX=false` — векторный индекс сохраняется в `chroma_db/` и обновляется только при изменении конфигурации.
 
 ---
 
-## Updating the index after config changes
+## Обновление индекса после изменений конфигурации
 
-When you re-export your 1C config and want to reflect changes:
+После повторной выгрузки конфигурации из 1С:
 
 ```bash
-# Rebuild SQLite (instant) + optionally re-vectorize
 curl -X POST http://localhost:8000/reindex
 ```
 
-Or via MCP tool: `reindex(force_chromadb=True)` to also update vectors.
+Или через MCP-инструмент: `reindex(force_chromadb=True)` для обновления векторов.
 
 ---
 
-## Source directory structure
+## Структура директории с исходниками
 
-The server expects your config export at `SOURCE_PATH`. It looks for `cf/` subdirectory:
+Сервер ожидает выгрузку конфигурации по пути `SOURCE_PATH`. Ищет подпапку `cf/`:
 
 ```
 SOURCE_PATH/
@@ -188,7 +187,7 @@ SOURCE_PATH/
     └── ...
 ```
 
-This is the standard output of **Configurator → Dump config to files**.
+Это стандартный результат **Конфигуратор → Выгрузить конфигурацию в файлы**.
 
 ---
 
@@ -208,6 +207,6 @@ curl http://localhost:8000/health
 
 ---
 
-## License
+## Лицензия
 
 MIT
