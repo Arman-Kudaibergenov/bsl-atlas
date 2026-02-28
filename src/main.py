@@ -1,4 +1,4 @@
-"""FastMCP server for 1C codebase search.
+﻿"""FastMCP server for 1C codebase search.
 
 Dual-layer architecture:
 - Structural layer (SQLite + FTS5): search_function, get_module_functions,
@@ -601,6 +601,7 @@ async def reindex_endpoint(request):
                 _rebuild_sqlite()
             if indexer:
                 _swap_to_reindex_provider()
+                indexer.clear_all()
                 sqlite_has_data = sqlite_store.has_data() if sqlite_store else False
                 indexer.index_directory(sqlite_enabled=sqlite_has_data)
             logger.info(f"Background reindex completed (provider: {config.reindex_provider})")
