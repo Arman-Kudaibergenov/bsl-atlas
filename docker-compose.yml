@@ -1,0 +1,43 @@
+services:
+  1c-codemetadata:
+    build: .
+    image: 1c-codemetadata:latest
+    container_name: 1c-codemetadata
+    ports:
+      - "${MCP_PORT:-8000}:8000"
+    volumes:
+      # Path to your 1C config dump (exported from Configurator)
+      - ${SOURCE_PATH:-./source}:/data/source:ro
+      # Persistent ChromaDB vector index
+      - ${CHROMA_PATH:-./chroma_db}:/data/chroma_db
+    environment:
+      # --- Embedding providers ---
+      # Simple setup: set OPENROUTER_API_KEY and all three use OpenRouter
+      # Hybrid setup (saves API costs): indexing=openrouter, search+reindex=ollama
+      # See README for details
+      - INDEXING_PROVIDER=${INDEXING_PROVIDER:-openrouter}
+      - SEARCH_PROVIDER=${SEARCH_PROVIDER:-openrouter}
+      - REINDEX_PROVIDER=${REINDEX_PROVIDER:-openrouter}
+
+      # --- API Keys ---
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+
+      # --- Ollama (optional, for hybrid setup) ---
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen3-embedding:8b}
+
+      # --- Indexing settings ---
+      - AUTO_INDEX=${AUTO_INDEX:-true}
+      - CHROMADB_AUTO_INDEX=${CHROMADB_AUTO_INDEX:-true}
+      - CHUNK_SIZE=${CHUNK_SIZE:-1000}
+      - CHUNK_OVERLAP=${CHUNK_OVERLAP:-100}
+      - EMBEDDING_CONCURRENCY=${EMBEDDING_CONCURRENCY:-5}
+      - EMBEDDING_BATCH_SIZE=${EMBEDDING_BATCH_SIZE:-10}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 120s

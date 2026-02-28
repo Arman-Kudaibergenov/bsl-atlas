@@ -1,0 +1,35 @@
+# Environment
+.env
+*.env
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Data (user-specific, potentially large)
+source/
+chroma_db/
+*.db
+*.db-wal
+*.db-shm
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Docker
+*.tar
+*.tar.gz
+
+# OS
+.DS_Store
+Thumbs.db
