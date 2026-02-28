@@ -12,7 +12,7 @@ MCP-сервер для 1С:Предприятие — векторный пои
 
 - Docker + Docker Compose
 - 1С:Предприятие 8.3 (Конфигуратор для выгрузки конфигурации)
-- API-ключ OpenRouter — [получить бесплатно](https://openrouter.ai/keys)
+- API-ключ OpenRouter — [openrouter.ai/keys](https://openrouter.ai/keys)
 
 ## Быстрый старт
 
