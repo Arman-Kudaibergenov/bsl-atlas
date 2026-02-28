@@ -1,5 +1,7 @@
 # BSL Atlas
 
+[![Docker Hub](https://img.shields.io/docker/v/armankudaibergenov/bsl-atlas?label=Docker%20Hub&logo=docker)](https://hub.docker.com/r/armankudaibergenov/bsl-atlas)
+
 MCP-сервер для 1С:Предприятие — векторный поиск, структурный индекс и граф вызовов в одном инструменте. Даёт AI-ассистентам мгновенный доступ к вашей конфигурации: находит функции, строит граф вызовов, ищет объекты метаданных и выполняет семантические запросы по BSL-коду — без чтения сырых файлов.
 
 ## Что умеет
