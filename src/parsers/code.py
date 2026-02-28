@@ -1,4 +1,4 @@
-"""Parser for 1C BSL code files.
+﻿"""Parser for 1C BSL code files.
 
 Parses .bsl files and extracts function/procedure information.
 """
@@ -11,6 +11,7 @@ from typing import Any
 import chardet
 
 from ..storage.models import BSLFunction
+from . import tree_sitter_parser
 
 logger = logging.getLogger(__name__)
 
@@ -201,7 +202,11 @@ class CodeParser:
         return result
 
     def parse_file_functions(self, file_path: str | Path) -> list[BSLFunction]:
-        """Parse BSL file and return enriched BSLFunction list for SQLite layer."""
+        """Parse BSL file and return enriched BSLFunction list for SQLite layer.
+
+        Uses tree-sitter for precise AST parsing when available,
+        falls back to regex parser otherwise.
+        """
         file_path = Path(file_path)
         content = self._read_file(file_path)
         if not content:
@@ -224,6 +229,28 @@ class CodeParser:
 
         module_type = self._extract_module_type(file_path)
 
+        # --- Try tree-sitter first ---
+        ts_results = tree_sitter_parser.parse_functions(
+            file_path, content.encode("utf-8", errors="replace")
+        )
+        if ts_results is not None:
+            return [
+                BSLFunction(
+                    name=f["name"],
+                    type=f["type"],
+                    params=f["params"],
+                    is_export=f["is_export"],
+                    line_start=f["line_start"],
+                    line_end=f["line_end"],
+                    calls=f["calls"],
+                    body=f["body"],
+                    module_path=module_path,
+                    module_type=module_type,
+                )
+                for f in ts_results
+            ]
+
+        # --- Regex fallback ---
         # Collect all function/procedure starts
         starts = []
         for match in self.PROCEDURE_PATTERN.finditer(content):
