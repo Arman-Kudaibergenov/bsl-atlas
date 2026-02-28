@@ -1,7 +1,6 @@
 services:
   bsl-atlas:
-    build: .
-    image: bsl-atlas:latest
+    image: armankudaibergenov/bsl-atlas:latest
     container_name: bsl-atlas
     ports:
       - "${MCP_PORT:-8000}:8000"

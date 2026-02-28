@@ -43,7 +43,7 @@ OPENROUTER_API_KEY=sk-or-v1-...
 docker compose up -d
 ```
 
-Первый запуск занимает 2-5 минут: SQLite индексируется сразу, ChromaDB векторизует в фоне (прогресс: `http://localhost:8000/health`).
+Образ скачается автоматически с Docker Hub (~500 МБ, один раз). SQLite проиндексируется сразу, ChromaDB векторизует в фоне — прогресс: `http://localhost:8000/health`.
 
 ### 4. Подключить к Claude
 
