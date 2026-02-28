@@ -1,4 +1,4 @@
-"""Configuration management via environment variables."""
+﻿"""Configuration management via environment variables."""
 
 import os
 from dataclasses import dataclass, field
@@ -26,20 +26,17 @@ class Config:
     )
     
     # Separate providers for indexing, search, and reindex
-    # indexing_provider: used once for initial ChromaDB bulk fill (cloud, parallel)
-    # search_provider: used for every search query (prefer local if you have Ollama)
-    # reindex_provider: used for incremental reindex after code changes (prefer local)
     indexing_provider: EmbeddingProvider = field(
         default_factory=lambda: os.getenv("INDEXING_PROVIDER") or os.getenv("EMBEDDING_PROVIDER", "openrouter")  # type: ignore
     )
     search_provider: EmbeddingProvider = field(
-        default_factory=lambda: os.getenv("SEARCH_PROVIDER") or os.getenv("EMBEDDING_PROVIDER", "openrouter")  # type: ignore
+        default_factory=lambda: os.getenv("SEARCH_PROVIDER") or os.getenv("EMBEDDING_PROVIDER", "ollama")  # type: ignore
     )
     reindex_provider: EmbeddingProvider = field(
-        default_factory=lambda: os.getenv("REINDEX_PROVIDER") or os.getenv("SEARCH_PROVIDER") or "openrouter"  # type: ignore
+        default_factory=lambda: os.getenv("REINDEX_PROVIDER") or os.getenv("SEARCH_PROVIDER") or "ollama"  # type: ignore
     )
-
-    # Ollama settings (optional, for local embedding inference)
+    
+    # Ollama settings
     ollama_base_url: str = field(default_factory=lambda: os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"))
     ollama_model: str = field(default_factory=lambda: os.getenv("OLLAMA_MODEL", "qwen3-embedding:8b"))
     

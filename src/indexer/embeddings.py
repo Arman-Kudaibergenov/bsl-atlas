@@ -1,4 +1,4 @@
-"""Embedding providers abstraction with cloud API support."""
+﻿"""Embedding providers abstraction with cloud API support."""
 
 import asyncio
 import logging
@@ -365,13 +365,13 @@ class OllamaEmbeddings:
     def __init__(
         self, 
         model: str = "qwen3-embedding:8b",
-        base_url: str = "http://192.168.0.108:11434",
+        base_url: str = "http://localhost:11434",
     ):
         """Initialize Ollama embeddings.
         
         Args:
             model: Ollama model name (default: qwen3-embedding:8b)
-            base_url: Ollama API endpoint (default: http://192.168.0.108:11434)
+            base_url: Ollama API endpoint (default: http://localhost:11434)
         """
         import httpx
         
@@ -519,7 +519,7 @@ def create_embedding_provider(
         case "ollama":
             return OllamaEmbeddings(
                 model=model or "qwen3-embedding:8b",
-                base_url=base_url or "http://192.168.0.108:11434",
+                base_url=base_url or "http://localhost:11434",
             )
         case "cohere":
             if not api_key:
