@@ -1,6 +1,5 @@
-"""Tests for BSL Parser with AST-based chunking."""
+﻿"""Tests for BSL Parser with AST-based chunking."""
 
-import os
 import sys
 from pathlib import Path
 
@@ -204,14 +203,13 @@ def test_object_name_extraction():
 
 
 def test_real_file():
-    """Test parsing a real BSL file from a local 1C config dump."""
+    """Test parsing a real BSL file from MinimKG."""
     parser = BSLParser()
-
-    # Find a real BSL file — configure via BSL_TEST_SOURCE env var
-    source = os.environ.get("BSL_TEST_SOURCE", "")
-    minimkg_path = Path(source) if source else Path("/nonexistent")
+    
+    # Find a real BSL file
+    minimkg_path = Path(r"C:\Users\Arman\workspace\MinimKG\src\cf")
     if not minimkg_path.exists():
-        print("[SKIP] test_real_file skipped (BSL_TEST_SOURCE not set or path not found)")
+        print("[SKIP] test_real_file skipped (MinimKG not found)")
         return
     
     # Find first BSL file

@@ -20,6 +20,7 @@ from .indexer import VectorIndexer
 from .indexer.embeddings import create_embedding_provider
 from .parsers.metadata_xml import MetadataXMLParser
 from .search import HybridSearch
+from .search.code_grep import CodeGrep
 from .storage.sqlite_store import SQLiteStore
 
 # Configure logging
@@ -33,6 +34,7 @@ logger = logging.getLogger(__name__)
 indexer: VectorIndexer | None = None
 search: HybridSearch | None = None
 sqlite_store: SQLiteStore | None = None
+_code_grep = CodeGrep()
 
 
 def _rebuild_sqlite():
@@ -503,6 +505,44 @@ def search_code_filtered(
 
 
 # ---------------------------------------------------------------------------
+# Raw grep tool — works in INDEXING_MODE=fast
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def code_grep(pattern: str, case_sensitive: bool = False, limit: int = 20) -> list[dict]:
+    """Search for text pattern in BSL code with AST context.
+
+    Unlike regular grep, returns matches with structural context:
+    which function/procedure contains the match, in which module.
+
+    Args:
+        pattern: Text pattern to search (substring match, not regex)
+        case_sensitive: Whether search is case-sensitive (default: False)
+        limit: Maximum results to return (default: 20)
+
+    Returns: List of matches with fields:
+        - file: relative path to .bsl file
+        - line: line number of match
+        - text: the matching line (trimmed)
+        - function: name of containing function/procedure (or "module level")
+        - module_type: type of module (ObjectModule, ManagerModule, etc.)
+        - context: 2 lines before + 2 lines after the match
+    """
+    source = config.source_path
+    if not source.exists():
+        return [{"error": f"SOURCE_PATH does not exist: {source}"}]
+
+    results = _code_grep.search(
+        pattern=pattern,
+        source_path=source,
+        case_sensitive=case_sensitive,
+        limit=limit,
+    )
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Utility tools
 # ---------------------------------------------------------------------------
 
@@ -512,7 +552,7 @@ def reindex(rebuild_sqlite: bool = True, force_chromadb: bool = False) -> dict:
     """Re-index the 1C codebase.
 
     SQLite rebuild is instant. ChromaDB reindex uses LOCAL embedding model
-    (REINDEX_PROVIDER, default: ollama/qwen3-embedding:4b) — no cloud API calls.
+    (REINDEX_PROVIDER, default: ollama/qwen3-embedding:8b) — no cloud API calls.
     Cloud provider (INDEXING_PROVIDER) is only used for initial bulk indexing at startup.
 
     Args:
