@@ -212,3 +212,7 @@ curl http://localhost:8000/health
 ## Лицензия
 
 MIT
+
+## Благодарности
+
+- [tree-sitter-bsl](https://github.com/alkoleft/tree-sitter-bsl) — грамматика Tree-sitter для языка 1С (BSL), используется для структурного парсинга кода
