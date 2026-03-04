@@ -1,4 +1,4 @@
-"""Smoke tests for SQLiteStore structural layer.
+﻿"""Smoke tests for SQLiteStore structural layer.
 
 Tests the key methods of SQLiteStore against real BSL content
 parsed by CodeParser. No ChromaDB or network calls needed.
@@ -353,6 +353,75 @@ class TestRebuild:
         stats = s.rebuild(bsl_files, metadata_objects)
         assert stats.files == 2
         assert stats.symbols >= 5
+
+
+# ---------------------------------------------------------------------------
+# code_grep — FTS5 body search
+# ---------------------------------------------------------------------------
+
+
+class TestCodeGrep:
+    def test_has_code_fts_after_rebuild(self, store):
+        assert store.has_code_fts()
+
+    def test_finds_pattern_in_body(self, store):
+        results = store.code_grep("ПолучитьСтавку")
+        assert len(results) >= 1
+        assert any("ПолучитьСтавку" in r["text"] for r in results)
+
+    def test_result_fields_present(self, store):
+        results = store.code_grep("Ставка")
+        assert len(results) >= 1
+        r = results[0]
+        assert "file" in r
+        assert "line" in r
+        assert "text" in r
+        assert "function" in r
+        assert "module_type" in r
+        assert "context" in r
+
+    def test_line_numbers_are_positive(self, store):
+        results = store.code_grep("Ставка")
+        assert len(results) >= 1
+        for r in results:
+            assert r["line"] > 0
+
+    def test_function_name_matches_container(self, store):
+        # Pattern appears inside ПровестиДокумент
+        results = store.code_grep("СформироватьДвижения")
+        assert len(results) >= 1
+        assert any(r["function"] == "ПровестиДокумент" for r in results)
+
+    def test_case_insensitive_by_default(self, store):
+        # lowercase pattern should still find Cyrillic match
+        results = store.code_grep("ставка", case_sensitive=False)
+        assert len(results) >= 1
+
+    def test_no_match_returns_empty(self, store):
+        results = store.code_grep("НесуществующийПаттерн99999")
+        assert results == []
+
+    def test_limit_respected(self, store):
+        results = store.code_grep("Ставка", limit=1)
+        assert len(results) <= 1
+
+    def test_results_sorted_by_file_and_line(self, store):
+        results = store.code_grep("Ставка")
+        if len(results) > 1:
+            for i in range(len(results) - 1):
+                a, b = results[i], results[i + 1]
+                assert (a["file"], a["line"]) <= (b["file"], b["line"])
+
+    def test_module_type_populated(self, store):
+        results = store.code_grep("ПровестиДокумент")
+        assert len(results) >= 1
+        assert all(r["module_type"] for r in results)
+
+    def test_pattern_in_different_module(self, store):
+        # РассчитатьСумму is defined in Module.bsl (CommonModule)
+        results = store.code_grep("РассчитатьСумму")
+        assert len(results) >= 1
+        assert any("РасчетСумм" in r["file"] or "Module" in r["file"] for r in results)
 
 
 if __name__ == "__main__":

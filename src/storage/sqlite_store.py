@@ -1,4 +1,4 @@
-"""SQLite structural index for BSL symbols and 1C metadata objects.
+﻿"""SQLite structural index for BSL symbols and 1C metadata objects.
 
 Provides fast exact/FTS5 lookup as the primary layer of the dual-layer architecture.
 ChromaDB is used for semantic search; this store handles structural queries.
@@ -31,6 +31,15 @@ logger = logging.getLogger(__name__)
 _SCHEMA_DDL = """
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
+
+CREATE VIRTUAL TABLE IF NOT EXISTS code_fts USING fts5(
+    file_path UNINDEXED,
+    function_name UNINDEXED,
+    module_type UNINDEXED,
+    body,
+    line_start UNINDEXED,
+    tokenize="unicode61"
+);
 
 CREATE TABLE IF NOT EXISTS files (
     id INTEGER PRIMARY KEY,
@@ -196,6 +205,7 @@ class SQLiteStore:
         with self._get_conn() as conn:
             # Virtual tables must be dropped before their content tables
             conn.executescript("""
+                DROP TABLE IF EXISTS code_fts;
                 DROP TABLE IF EXISTS symbols_fts;
                 DROP TABLE IF EXISTS objects_fts;
                 DROP TABLE IF EXISTS calls;
@@ -338,6 +348,16 @@ class SQLiteStore:
                     "INSERT OR IGNORE INTO calls (caller_id, callee_name) VALUES (?, ?)",
                     (symbol_id, callee),
                 )
+
+            # Index function body into FTS5 for fast grep
+            if func.body and fts5_ok:
+                try:
+                    conn.execute(
+                        "INSERT INTO code_fts(file_path, function_name, module_type, body, line_start) VALUES (?, ?, ?, ?, ?)",
+                        (path_str, func.name, module_type, func.body, str(func.line_start)),
+                    )
+                except sqlite3.OperationalError as exc:
+                    logger.debug(f"code_fts insert failed: {exc}")
 
         logger.debug(f"Indexed {len(functions)} symbols from {path_str}")
 
@@ -687,6 +707,99 @@ class SQLiteStore:
                         )
 
         return results
+
+    # ------------------------------------------------------------------
+    # Code grep via FTS5
+    # ------------------------------------------------------------------
+
+    def has_code_fts(self) -> bool:
+        """Return True if code_fts has been populated."""
+        with self._get_conn() as conn:
+            try:
+                count = conn.execute("SELECT COUNT(*) FROM code_fts").fetchone()[0]
+                return count > 0
+            except sqlite3.OperationalError:
+                return False
+
+    def code_grep(
+        self,
+        pattern: str,
+        case_sensitive: bool = False,
+        limit: int = 20,
+    ) -> list[dict] | None:
+        """Search for pattern in indexed BSL function bodies using FTS5.
+
+        Returns list of match dicts (same schema as CodeGrep.search),
+        or None if code_fts is not populated (caller should fall back).
+        """
+        if not pattern:
+            return []
+
+        with self._get_conn() as conn:
+            # Build FTS5 query from the pattern:
+            # extract word tokens, use first word as prefix for narrowing,
+            # then do exact substring match on the returned bodies.
+            words = re.findall(r"[А-Яа-яёЁA-Za-z0-9_]+", pattern)
+            if not words:
+                return []
+
+            if len(words) == 1:
+                fts_query = words[0] + "*"
+            else:
+                # Phrase: all words must appear in sequence
+                fts_query = '"' + " ".join(words) + '"'
+
+            try:
+                rows = conn.execute(
+                    "SELECT file_path, function_name, module_type, body, line_start FROM code_fts WHERE body MATCH ?",
+                    (fts_query,),
+                ).fetchall()
+            except sqlite3.OperationalError as exc:
+                logger.debug(f"code_fts MATCH failed ({exc}), skipping FTS path")
+                return None
+
+            if not rows:
+                return []
+
+            search_pat = pattern if case_sensitive else pattern.lower()
+            results: list[dict] = []
+
+            for row in rows:
+                body: str = row["body"] or ""
+                body_lines = body.splitlines()
+                try:
+                    line_start = int(row["line_start"])
+                except (ValueError, TypeError):
+                    line_start = 1
+
+                for i, line in enumerate(body_lines):
+                    check = line if case_sensitive else line.lower()
+                    if search_pat not in check:
+                        continue
+
+                    abs_line = line_start + i
+
+                    ctx_start = max(0, i - 2)
+                    ctx_end = min(len(body_lines), i + 3)
+                    context = "\n".join(body_lines[ctx_start:ctx_end])
+
+                    results.append({
+                        "file": row["file_path"],
+                        "line": abs_line,
+                        "text": line.strip(),
+                        "function": row["function_name"],
+                        "module_type": row["module_type"],
+                        "context": context,
+                    })
+
+                    if len(results) >= limit:
+                        break
+
+                if len(results) >= limit:
+                    break
+
+            results.sort(key=lambda r: (r["file"], r["line"]))
+            return results[:limit]
 
     # ------------------------------------------------------------------
     # Statistics

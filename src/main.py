@@ -516,6 +516,9 @@ def code_grep(pattern: str, case_sensitive: bool = False, limit: int = 20) -> li
     Unlike regular grep, returns matches with structural context:
     which function/procedure contains the match, in which module.
 
+    Uses SQLite FTS5 index (instant, <100ms) when available.
+    Falls back to file scanning when index is not yet built.
+
     Args:
         pattern: Text pattern to search (substring match, not regex)
         case_sensitive: Whether search is case-sensitive (default: False)
@@ -529,17 +532,23 @@ def code_grep(pattern: str, case_sensitive: bool = False, limit: int = 20) -> li
         - module_type: type of module (ObjectModule, ManagerModule, etc.)
         - context: 2 lines before + 2 lines after the match
     """
+    # Fast path: FTS5 index (instant)
+    if sqlite_store and sqlite_store.has_code_fts():
+        results = sqlite_store.code_grep(pattern, case_sensitive=case_sensitive, limit=limit)
+        if results is not None:
+            return results
+
+    # Fallback: file scanning (slow, used when index not yet built)
     source = config.source_path
     if not source.exists():
         return [{"error": f"SOURCE_PATH does not exist: {source}"}]
 
-    results = _code_grep.search(
+    return _code_grep.search(
         pattern=pattern,
         source_path=source,
         case_sensitive=case_sensitive,
         limit=limit,
     )
-    return results
 
 
 # ---------------------------------------------------------------------------
