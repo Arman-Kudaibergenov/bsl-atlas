@@ -126,6 +126,9 @@ class VectorIndexer:
     ):
         """Add documents to ChromaDB collection with retry logic.
 
+        Gets embeddings explicitly via embed_raw and filters out None entries
+        before calling collection.add, matching the same fix applied in _batch_index_chunks.
+
         Args:
             collection: ChromaDB collection
             ids: Document IDs
@@ -134,17 +137,30 @@ class VectorIndexer:
             max_retries: Maximum retry attempts
         """
         import time
-        
+
         last_error = None
         for attempt in range(max_retries):
             try:
+                # Get embeddings explicitly so we can filter out failures (None)
+                embeddings = self.embedding_function.embed_raw(contents)
+                valid = [(i, e) for i, e in enumerate(embeddings) if e is not None]
+                if len(valid) < len(contents):
+                    skipped = len(contents) - len(valid)
+                    logger.warning(
+                        f"Skipping {skipped} chunks with failed embeddings "
+                        f"in retry batch for {collection.name}"
+                    )
+                if not valid:
+                    return
+                valid_idx = [i for i, _ in valid]
                 collection.add(
-                    ids=ids,
-                    documents=contents,
-                    metadatas=metadatas,
+                    ids=[ids[i] for i in valid_idx],
+                    documents=[contents[i] for i in valid_idx],
+                    metadatas=[metadatas[i] for i in valid_idx],
+                    embeddings=[e for _, e in valid],
                 )
                 return  # Success
-                
+
             except Exception as e:
                 last_error = e
                 if attempt < max_retries - 1:
@@ -154,7 +170,7 @@ class VectorIndexer:
                         f"Error: {type(e).__name__}. Waiting {delay}s..."
                     )
                     time.sleep(delay)
-        
+
         # All retries failed
         logger.error(
             f"Failed to add batch to {collection.name} after {max_retries} retries. "
