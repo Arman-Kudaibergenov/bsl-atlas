@@ -1,4 +1,4 @@
-"""Hybrid search combining vector and fulltext search.
+﻿"""Hybrid search combining vector and fulltext search.
 
 Ported from comol/1c_code_metadata_mcp with improvements.
 """
@@ -10,6 +10,45 @@ from typing import Any, Protocol, runtime_checkable
 import chromadb
 
 logger = logging.getLogger(__name__)
+
+
+def _rerank_results(
+    results: list[dict[str, Any]],
+    query: str,
+    reranker_url: str,
+    top_k: int,
+) -> list[dict[str, Any]]:
+    """Call cross-encoder reranker to re-sort results by relevance.
+
+    Falls back to original order if reranker is unavailable.
+    """
+    try:
+        import urllib.request
+        import urllib.error
+        import json
+
+        documents = [r.get("content", "") for r in results]
+        payload = json.dumps({"query": query, "documents": documents, "top_k": top_k}).encode()
+        req = urllib.request.Request(
+            f"{reranker_url}/rerank",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read())
+
+        reranked = []
+        for item in data.get("results", []):
+            idx = item["index"]
+            if idx < len(results):
+                r = results[idx].copy()
+                r["score"] = item["score"]
+                reranked.append(r)
+        return reranked or results[:top_k]
+    except Exception as exc:
+        logger.warning(f"Reranker unavailable, using original order: {exc}")
+        return results[:top_k]
 
 
 @runtime_checkable
@@ -44,6 +83,7 @@ class HybridSearch:
         code_collection: chromadb.Collection,
         help_collection: chromadb.Collection,
         search_embedding_provider: EmbeddingProvider | None = None,
+        reranker_url: str = "",
     ):
         """Initialize hybrid search.
 
@@ -53,14 +93,19 @@ class HybridSearch:
             help_collection: ChromaDB collection for help
             search_embedding_provider: Optional separate embedding provider for search queries.
                 If provided, will be used instead of collection's embedding function.
+            reranker_url: Optional URL of cross-encoder reranker service (e.g. http://192.168.0.108:8400).
+                If set, search results will be re-ranked before returning.
         """
         self.metadata_collection = metadata_collection
         self.code_collection = code_collection
         self.help_collection = help_collection
         self.search_embedding_provider = search_embedding_provider
-        
+        self.reranker_url = reranker_url.rstrip("/")
+
         if search_embedding_provider:
             logger.info("Using separate embedding provider for search queries")
+        if reranker_url:
+            logger.info(f"Reranker enabled: {reranker_url}")
 
     def _prepare_query(self, query: str) -> str:
         """Prepare query with 1C terminology transformations.
@@ -211,7 +256,11 @@ class HybridSearch:
             List of search results
         """
         logger.info(f"Searching code for: {query}")
-        return self._perform_hybrid_search(self.code_collection, query, limit)
+        fetch_limit = max(limit * 2, 20) if self.reranker_url else limit
+        results = self._perform_hybrid_search(self.code_collection, query, fetch_limit)
+        if self.reranker_url and results:
+            results = _rerank_results(results, query, self.reranker_url, limit)
+        return results[:limit]
 
     def search_code_filtered(
         self,
@@ -252,7 +301,11 @@ class HybridSearch:
             f"Searching code (filtered) for: {query!r}, "
             f"module_type={module_type!r}, only_export={only_export}"
         )
-        return self._perform_hybrid_search(self.code_collection, query, limit, where=where)
+        fetch_limit = max(limit * 2, 20) if self.reranker_url else limit
+        results = self._perform_hybrid_search(self.code_collection, query, fetch_limit, where=where)
+        if self.reranker_url and results:
+            results = _rerank_results(results, query, self.reranker_url, limit)
+        return results[:limit]
 
     def search_help(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
         """Search help collection.
@@ -265,7 +318,11 @@ class HybridSearch:
             List of search results
         """
         logger.info(f"Searching help for: {query}")
-        return self._perform_hybrid_search(self.help_collection, query, limit)
+        fetch_limit = max(limit * 2, 20) if self.reranker_url else limit
+        results = self._perform_hybrid_search(self.help_collection, query, fetch_limit)
+        if self.reranker_url and results:
+            results = _rerank_results(results, query, self.reranker_url, limit)
+        return results[:limit]
 
     def search_all(self, query: str, limit: int = 10) -> dict[str, list[dict[str, Any]]]:
         """Search all collections.

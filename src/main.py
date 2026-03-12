@@ -143,6 +143,7 @@ def init_services():
             code_collection=indexer.code_collection,
             help_collection=indexer.help_collection,
             search_embedding_provider=search_embedding_provider,
+            reranker_url=config.reranker_url,
         )
 
         if config.chromadb_auto_index:
