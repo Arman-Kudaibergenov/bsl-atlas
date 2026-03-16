@@ -5,7 +5,7 @@ services:
     ports:
       - "${MCP_PORT:-8000}:8000"
     volumes:
-      # Path to your 1C config dump (exported from Configurator)
+      # Required bind mount: path to your 1C config dump (exported from Configurator)
       - ${SOURCE_PATH:-./source}:/data/source:ro
       # Persistent ChromaDB vector index
       - ${CHROMA_PATH:-./chroma_db}:/data/chroma_db

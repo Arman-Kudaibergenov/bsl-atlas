@@ -2,75 +2,70 @@
 
 [![Docker Hub](https://img.shields.io/docker/v/armankudaibergenov/bsl-atlas?label=Docker%20Hub&logo=docker)](https://hub.docker.com/r/armankudaibergenov/bsl-atlas)
 
-MCP-сервер для 1С:Предприятие — векторный поиск, структурный индекс и граф вызовов в одном инструменте. Даёт AI-ассистентам мгновенный доступ к вашей конфигурации: находит функции, строит граф вызовов, ищет объекты метаданных и выполняет семантические запросы по BSL-коду — без чтения сырых файлов.
+Public MCP server for indexed 1C code search. It indexes XML/BSL sources exported from 1C Configurator and exposes structural and semantic search tools for AI assistants.
 
-## Что умеет
+## Status
 
-- **Структурный поиск** (SQLite + FTS5, мгновенно): поиск функций по имени, список процедур модуля, граф вызовов (что вызывает что), поиск объектов метаданных (справочники, документы, регистры и др.)
-- **Семантический поиск** (ChromaDB, векторный): найти код по описанию — "как реализовано проведение", "где логируются ошибки"
-- **Два слоя**: SQLite пересобирается за секунды при старте; ChromaDB индексируется один раз в фоне через провайдер эмбеддингов на ваш выбор
+- Public/external codemetadata product
+- Internal/private counterpart exists in a separate private repository
+- This repo is for public onboarding and portable deployment, not private Jefest operator runbooks
 
-## Два режима работы
+## What it does
 
-| | **fast** (по умолчанию) | **full** |
-|---|---|---|
-| **Что работает** | Структурный поиск: функции, граф вызовов, метаданные | Всё из fast + семантический поиск (ChromaDB) |
-| **API-ключ** | Не нужен | Нужен (OpenRouter, OpenAI, Ollama и др.) |
-| **Запуск** | Мгновенно | SQLite сразу + векторизация в фоне |
-| **Использование** | `INDEXING_MODE=fast` (или не задавать) | `INDEXING_MODE=full` |
+- Structural search via SQLite/FTS: functions, procedures, metadata objects, attributes, call graph
+- Optional semantic search via ChromaDB embeddings
+- Fast startup path with `INDEXING_MODE=fast`
+- Reindex support after configuration dumps change
 
-**fast** — хороший старт: структурный поиск покрывает большинство задач. Переключитесь на **full** когда понадобится `codesearch` / `helpsearch`.
+## Modes
 
-## Что нужно
+| Mode | What you get | Requirements |
+|------|---------------|--------------|
+| `fast` | Structural search only | Docker, exported 1C sources |
+| `full` | Structural + semantic search | Docker, exported 1C sources, embedding provider/API key |
 
-**Режим fast:**
-- Docker + Docker Compose
-- 1С:Предприятие 8.3 (Конфигуратор для выгрузки конфигурации)
+`fast` is the default and is the recommended starting point.
 
-**Режим full (дополнительно):**
-- API-ключ OpenRouter — [openrouter.ai/keys](https://openrouter.ai/keys) (или другой провайдер)
+## Important: Docker source mount is required
 
-## Быстрый старт
+If you run `bsl-atlas` in Docker, the container must see your exported 1C sources through the `SOURCE_PATH -> /data/source` bind mount from `docker-compose.yml`.
 
-### 1. Выгрузить конфигурацию
+- `SOURCE_PATH` is required for indexing real project files
+- If the bind mount fails, `/data/source` exists but is empty and Atlas will report that the source directory is empty
+- This is separate from RLM. Atlas needs the source mount because it reads XML/BSL files directly
 
-В Конфигураторе: **Конфигурация → Выгрузить конфигурацию в файлы**
+## Quick Start
 
-Укажите пустую папку, например `C:\my-config\`. После выгрузки появятся сотни XML-файлов и `.bsl`-модулей.
+### 1. Export 1C sources
 
-### 2. Скачать конфиг и настроить
+In 1C Configurator use `Configuration -> Dump configuration to files` and point it to an empty directory.
+
+### 2. Download config files
 
 ```bash
 curl -O https://raw.githubusercontent.com/Arman-Kudaibergenov/bsl-atlas/master/docker-compose.yml
 curl -O https://raw.githubusercontent.com/Arman-Kudaibergenov/bsl-atlas/master/.env.example
-mv .env.example .env
+cp .env.example .env
 ```
 
-Отредактировать `.env`:
+### 3. Configure `.env`
 
 ```env
-SOURCE_PATH=C:\my-config     # папка с выгрузкой конфигурации
-
-# Режим fast (по умолчанию) — API-ключ не нужен:
+SOURCE_PATH=C:\bsl-src
 INDEXING_MODE=fast
-
-# Режим full — добавьте API-ключ:
-# INDEXING_MODE=full
-# OPENROUTER_API_KEY=sk-or-v1-...
 ```
 
-### 3. Запустить
+For `full` mode also set an embedding provider and API key.
+
+### 4. Start
 
 ```bash
 docker compose up -d
 ```
 
-Образ скачается автоматически с Docker Hub (~500 МБ, один раз). SQLite проиндексируется сразу.
-В режиме **full** ChromaDB векторизует в фоне — прогресс: `http://localhost:8000/health`.
+### 5. Connect from Claude
 
-### 4. Подключить к Claude
-
-**Claude Desktop** — добавить в `claude_desktop_config.json`:
+Add to `claude_desktop_config.json` or project `.mcp.json`:
 
 ```json
 {
@@ -83,181 +78,77 @@ docker compose up -d
 }
 ```
 
-Расположение файла:
-- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
-- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+## Windows notes
 
-**Claude Code** — добавить в `.mcp.json` в корне проекта:
+Docker Desktop on Windows can fail on paths with spaces or Cyrillic characters. If your real path looks like `C:\1C\Exports\My Config`, create an ASCII alias first and mount that path instead.
 
-```json
-{
-  "mcpServers": {
-    "bsl-atlas": {
-      "type": "http",
-      "url": "http://localhost:8000/mcp"
-    }
-  }
-}
+```powershell
+cmd /c mklink /D C:\bsl-src "C:\1C\Exports\My Config"
 ```
 
----
-
-## Инструменты MCP
-
-### Структурные (SQLite — мгновенно)
-
-| Инструмент | Что делает |
-|-----------|-----------|
-| `search_function(name)` | Найти функцию/процедуру по имени во всех модулях |
-| `get_module_functions(path)` | Список всех процедур/функций модуля |
-| `get_function_context(name)` | Граф вызовов: что вызывает функция и кто вызывает её |
-| `metadatasearch(query)` | Полнотекстовый поиск по объектам метаданных |
-| `get_object_details(full_name)` | Реквизиты, табличные части, измерения регистра |
-
-### Семантические (ChromaDB — векторный поиск)
-
-| Инструмент | Что делает |
-|-----------|-----------|
-| `codesearch(query)` | Поиск кода по описанию на естественном языке |
-| `helpsearch(query)` | Поиск по проиндексированной справке |
-| `search_code_filtered(query, object_type)` | Векторный поиск с фильтром (например, только Документы) |
-
-### Утилиты
-
-| Инструмент | Что делает |
-|-----------|-----------|
-| `reindex(force_chromadb)` | Перестроить индексы после изменений конфигурации |
-| `stats()` | Статистика индекса: количество объектов, функций и др. |
-
----
-
-## Настройка
-
-Все параметры задаются через переменные окружения в `.env`.
-
-### Режим индексации
+Then set:
 
 ```env
-INDEXING_MODE=fast   # только SQLite, без API-ключа (по умолчанию)
-INDEXING_MODE=full   # SQLite + ChromaDB векторы, нужен провайдер эмбеддингов
+SOURCE_PATH=C:\bsl-src
 ```
 
-В режиме `fast` семантические инструменты (`codesearch`, `helpsearch`, `search_code_filtered`) возвращают подсказку включить `INDEXING_MODE=full`.
+If Atlas reports that `SOURCE_PATH` is empty, the bind mount is wrong even if the folder exists inside the container.
 
-### Провайдеры эмбеддингов
+## Supported layouts
 
-Сервер использует три отдельных провайдера — можно комбинировать:
+The source path can point to any of these layouts:
 
-| Переменная | Используется для | По умолчанию |
-|-----------|-----------------|-------------|
-| `INDEXING_PROVIDER` | Первоначальное заполнение ChromaDB (один раз) | `openrouter` |
-| `SEARCH_PROVIDER` | Каждый поисковый запрос | `openrouter` |
-| `REINDEX_PROVIDER` | Переиндексация после изменений кода | `openrouter` |
-
-Поддерживаемые значения: `openrouter`, `openai`, `ollama`, `cohere`, `jina`
-
-### Гибридная схема (рекомендуется если есть Ollama)
-
-Если у вас запущен Ollama локально — поиск и переиндексация становятся бесплатными, облако используется только для первоначальной индексации:
-
-```env
-INDEXING_PROVIDER=openrouter    # облако, быстро, параллельно — один раз
-SEARCH_PROVIDER=ollama          # бесплатный локальный инференс для каждого запроса
-REINDEX_PROVIDER=ollama         # бесплатный локальный инференс для переиндексации
-
-OLLAMA_BASE_URL=http://host.docker.internal:11434
-OLLAMA_MODEL=qwen3-embedding:4b  # лучшая модель для русского/BSL
+```text
+SOURCE_PATH/
+  cf/
+    Catalogs/
+    Documents/
+    CommonModules/
 ```
 
-`qwen3-embedding:4b` требует ~2.5 ГБ RAM. Скачать: `ollama pull qwen3-embedding:4b`
-
-> **Бенчмарк:** qwen3-embedding:4b показала результаты, сопоставимые с полноразмерной моделью, при вдвое меньшем потреблении памяти — оптимальный выбор для большинства случаев.
-
-### Модель OpenRouter
-
-По умолчанию используется `qwen/qwen3-embedding-4b` — оптимизирована для русского языка и кириллического кода. Переопределить:
-
-```env
-EMBEDDING_MODEL=openai/text-embedding-3-small
+```text
+SOURCE_PATH/
+  Catalogs/
+  Documents/
+  CommonModules/
 ```
 
-### Параметры индексации
-
-```env
-AUTO_INDEX=true              # пересобирать SQLite при каждом старте
-CHROMADB_AUTO_INDEX=true     # векторизовать при первом запуске; после — false
-EMBEDDING_CONCURRENCY=5      # параллельные запросы к API (5 — безопасно, 10 — быстрее)
-EMBEDDING_BATCH_SIZE=10      # текстов в одном запросе к API
+```text
+SOURCE_PATH/
+  cfe/
+    MyExtension/
+      Catalogs/
+      CommonModules/
 ```
 
-> **После первого запуска** установите `CHROMADB_AUTO_INDEX=false` — векторный индекс сохраняется в папке `chroma_db/` рядом с `docker-compose.yml` (или по пути `CHROMA_PATH` если задан в `.env`). При повторном запуске индекс загружается из этой папки — повторная векторизация не нужна.
+## Core tools
 
----
+- `search_function(name)` - find a function or procedure by name
+- `get_module_functions(path)` - list functions in a module
+- `get_function_context(name)` - call graph
+- `metadatasearch(query)` - search metadata objects
+- `get_object_details(full_name)` - inspect object structure
+- `codesearch(query)` - semantic search in `full` mode
+- `helpsearch(query)` - semantic help search in `full` mode
+- `reindex(force_chromadb)` - rebuild indexes after changes
+- `stats()` - index statistics
 
-## Обновление индекса после изменений конфигурации
+## Reindex after changes
 
-После повторной выгрузки конфигурации из 1С:
+After you re-export the 1C configuration:
 
 ```bash
 curl -X POST http://localhost:8000/reindex
 ```
 
-Или через MCP-инструмент: `reindex(force_chromadb=True)` для обновления векторов.
+## Embedding defaults
 
----
+- Recommended family: `qwen3-embedding-4b`
+- OpenRouter name: `qwen/qwen3-embedding-4b`
+- Ollama name: `qwen3-embedding:4b`
 
-## Структура директории с исходниками
+## Project boundary
 
-Сервер ожидает выгрузку конфигурации по пути `SOURCE_PATH`. Поддерживаются разные структуры — `cf/` подкаталог **не обязателен**:
-
-```
-# Вариант 1: выгрузка конфигурации (cf/)
-SOURCE_PATH/
-└── cf/
-    ├── Catalogs/
-    ├── Documents/
-    └── CommonModules/
-
-# Вариант 2: выгрузка расширения (файлы в корне)
-SOURCE_PATH/
-├── Catalogs/
-├── Documents/
-└── CommonModules/
-
-# Вариант 3: расширения через cfe/
-SOURCE_PATH/
-└── cfe/
-    └── МоёРасширение/
-        ├── Catalogs/
-        └── CommonModules/
-```
-
-Это стандартный результат **Конфигуратор → Выгрузить конфигурацию в файлы** (или расширение в файлы).
-
-> **Пути с кириллицей и пробелами (Windows):** Docker Desktop может не смонтировать путь вроде `C:\1С\Выгрузки баз\УТ`. Если при запуске ошибка "SOURCE_PATH does not exist" — создайте символическую ссылку без пробелов: `mklink /D C:\config "C:\1С\Выгрузки баз\УТ"` и укажите `SOURCE_PATH=C:\config`.
-
----
-
-## Health check
-
-```bash
-curl http://localhost:8000/health
-```
-
-```json
-{
-  "status": "ok",
-  "sqlite": {"objects": 345, "functions": 1240},
-  "chromadb": {"indexed": 1240, "status": "ready"}
-}
-```
-
----
-
-## Лицензия
-
-MIT
-
-## Благодарности
-
-- [tree-sitter-bsl](https://github.com/alkoleft/tree-sitter-bsl) — грамматика Tree-sitter для языка 1С (BSL), используется для структурного парсинга кода
+- `bsl-atlas` is the public product line
+- `1c-enhanced-codemetadata` is the private/internal implementation line
+- `AuditJefest` remains the private production/operator truth for the Jefest contour
