@@ -2,45 +2,42 @@
 
 [![Docker Hub](https://img.shields.io/docker/v/armankudaibergenov/bsl-atlas?label=Docker%20Hub&logo=docker)](https://hub.docker.com/r/armankudaibergenov/bsl-atlas)
 
-Public MCP server for indexed 1C code search. It indexes XML/BSL sources exported from 1C Configurator and exposes structural and semantic search tools for AI assistants.
+Публичный MCP-сервер для быстрой индексации и поиска по исходникам 1С. Работает с XML/BSL-выгрузкой конфигурации или расширения и отдает структурный и, при необходимости, семантический поиск для AI-ассистентов.
 
-## Status
+## Что умеет
 
-- Public/external codemetadata product
-- Internal/private counterpart exists in a separate private repository
-- This repo is for public onboarding and portable deployment, not private Jefest operator runbooks
+- искать функции, процедуры и модули через SQLite/FTS
+- искать объекты метаданных, реквизиты и связи
+- строить контекст по вызовам и структуре модулей
+- работать в `fast` режиме без внешних embedding API
+- переиндексировать проект после новой выгрузки
 
-## What it does
+## Режимы
 
-- Structural search via SQLite/FTS: functions, procedures, metadata objects, attributes, call graph
-- Optional semantic search via ChromaDB embeddings
-- Fast startup path with `INDEXING_MODE=fast`
-- Reindex support after configuration dumps change
+| Режим | Что дает | Что нужно |
+|------|----------|------------|
+| `fast` | быстрый структурный поиск | Docker и выгруженные исходники 1С |
+| `full` | структурный + семантический поиск | Docker, исходники и embedding backend/API key |
 
-## Modes
+`fast` — основной и рекомендуемый стартовый режим.
 
-| Mode | What you get | Requirements |
-|------|---------------|--------------|
-| `fast` | Structural search only | Docker, exported 1C sources |
-| `full` | Structural + semantic search | Docker, exported 1C sources, embedding provider/API key |
+## Важно: mount исходников обязателен
 
-`fast` is the default and is the recommended starting point.
+Если вы запускаете `bsl-atlas` в Docker, контейнер обязан видеть реальные исходники проекта через bind mount `SOURCE_PATH -> /data/source`.
 
-## Important: Docker source mount is required
+- `SOURCE_PATH` нужен для индексации файлов
+- если bind mount настроен неверно, `/data/source` внутри контейнера может существовать, но будет пустым
+- в этом случае Atlas честно сообщит, что каталог исходников пустой
 
-If you run `bsl-atlas` in Docker, the container must see your exported 1C sources through the `SOURCE_PATH -> /data/source` bind mount from `docker-compose.yml`.
+Это отдельная тема от RLM: Atlas читает файлы проекта напрямую, поэтому без source mount индексировать нечего.
 
-- `SOURCE_PATH` is required for indexing real project files
-- If the bind mount fails, `/data/source` exists but is empty and Atlas will report that the source directory is empty
-- This is separate from RLM. Atlas needs the source mount because it reads XML/BSL files directly
+## Быстрый старт
 
-## Quick Start
+### 1. Выгрузите исходники 1С
 
-### 1. Export 1C sources
+В конфигураторе используйте `Конфигурация -> Выгрузить конфигурацию в файлы` и укажите пустой каталог.
 
-In 1C Configurator use `Configuration -> Dump configuration to files` and point it to an empty directory.
-
-### 2. Download config files
+### 2. Скачайте конфиги
 
 ```bash
 curl -O https://raw.githubusercontent.com/Arman-Kudaibergenov/bsl-atlas/master/docker-compose.yml
@@ -48,24 +45,24 @@ curl -O https://raw.githubusercontent.com/Arman-Kudaibergenov/bsl-atlas/master/.
 cp .env.example .env
 ```
 
-### 3. Configure `.env`
+### 3. Заполните `.env`
 
 ```env
 SOURCE_PATH=C:\bsl-src
 INDEXING_MODE=fast
 ```
 
-For `full` mode also set an embedding provider and API key.
+Для `full` режима дополнительно укажите embedding provider и нужные ключи.
 
-### 4. Start
+### 4. Запустите контейнер
 
 ```bash
 docker compose up -d
 ```
 
-### 5. Connect from Claude
+### 5. Подключите MCP в Claude
 
-Add to `claude_desktop_config.json` or project `.mcp.json`:
+Добавьте в `claude_desktop_config.json` или в `.mcp.json` проекта:
 
 ```json
 {
@@ -78,25 +75,25 @@ Add to `claude_desktop_config.json` or project `.mcp.json`:
 }
 ```
 
-## Windows notes
+## Windows: что важно
 
-Docker Desktop on Windows can fail on paths with spaces or Cyrillic characters. If your real path looks like `C:\1C\Exports\My Config`, create an ASCII alias first and mount that path instead.
+Docker Desktop на Windows часто ломается на путях с пробелами или кириллицей. Если реальный путь выглядит как `C:\1С\Выгрузки\МояКонфигурация`, лучше сначала сделать ASCII-алиас.
 
 ```powershell
-cmd /c mklink /D C:\bsl-src "C:\1C\Exports\My Config"
+cmd /c mklink /D C:\bsl-src "C:\1С\Выгрузки\МояКонфигурация"
 ```
 
-Then set:
+После этого в `.env` используйте:
 
 ```env
 SOURCE_PATH=C:\bsl-src
 ```
 
-If Atlas reports that `SOURCE_PATH` is empty, the bind mount is wrong even if the folder exists inside the container.
+Если Atlas пишет, что `SOURCE_PATH` пустой, проблема почти всегда в bind mount, а не в самом приложении.
 
-## Supported layouts
+## Поддерживаемые структуры
 
-The source path can point to any of these layouts:
+Каталог исходников может выглядеть так:
 
 ```text
 SOURCE_PATH/
@@ -106,12 +103,16 @@ SOURCE_PATH/
     CommonModules/
 ```
 
+или так:
+
 ```text
 SOURCE_PATH/
   Catalogs/
   Documents/
   CommonModules/
 ```
+
+или так:
 
 ```text
 SOURCE_PATH/
@@ -121,21 +122,21 @@ SOURCE_PATH/
       CommonModules/
 ```
 
-## Core tools
+## Основные инструменты
 
-- `search_function(name)` - find a function or procedure by name
-- `get_module_functions(path)` - list functions in a module
-- `get_function_context(name)` - call graph
-- `metadatasearch(query)` - search metadata objects
-- `get_object_details(full_name)` - inspect object structure
-- `codesearch(query)` - semantic search in `full` mode
-- `helpsearch(query)` - semantic help search in `full` mode
-- `reindex(force_chromadb)` - rebuild indexes after changes
-- `stats()` - index statistics
+- `search_function(name)` — найти функцию или процедуру по имени
+- `get_module_functions(path)` — список функций модуля
+- `get_function_context(name)` — контекст вызовов
+- `metadatasearch(query)` — поиск по объектам метаданных
+- `get_object_details(full_name)` — структура объекта
+- `codesearch(query)` — семантический поиск в `full` режиме
+- `helpsearch(query)` — поиск по help/knowledge слою в `full` режиме
+- `reindex(force_chromadb)` — переиндексация после изменений
+- `stats()` — статистика индекса
 
-## Reindex after changes
+## Переиндексация
 
-After you re-export the 1C configuration:
+После новой выгрузки исходников:
 
 ```bash
 curl -X POST http://localhost:8000/reindex
@@ -143,12 +144,6 @@ curl -X POST http://localhost:8000/reindex
 
 ## Embedding defaults
 
-- Recommended family: `qwen3-embedding-4b`
-- OpenRouter name: `qwen/qwen3-embedding-4b`
-- Ollama name: `qwen3-embedding:4b`
-
-## Project boundary
-
-- `bsl-atlas` is the public product line
-- `1c-enhanced-codemetadata` is the private/internal implementation line
-- `AuditJefest` remains the private production/operator truth for the Jefest contour
+- рекомендуемое семейство: `qwen3-embedding-4b`
+- OpenRouter: `qwen/qwen3-embedding-4b`
+- Ollama: `qwen3-embedding:4b`
