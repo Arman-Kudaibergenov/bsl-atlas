@@ -91,7 +91,10 @@ class Config:
         default_factory=lambda: os.getenv("CHROMADB_AUTO_INDEX", os.getenv("AUTO_INDEX", "false")).lower() == "true"
     )
     chromadb_schedule: str = field(default_factory=lambda: os.getenv("CHROMADB_SCHEDULE", ""))
-    
+
+    # Reranker service URL (optional cross-encoder reranking)
+    reranker_url: str = field(default_factory=lambda: os.getenv("RERANKER_URL", ""))
+
     def get_api_key(self, provider: EmbeddingProvider | None = None) -> str | None:
         """Get API key for the specified or configured embedding provider.
         

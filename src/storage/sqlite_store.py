@@ -9,8 +9,9 @@ import json
 import logging
 import re
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Generator
 
 from ..parsers.code import CodeParser
 from .models import (
@@ -190,12 +191,26 @@ class SQLiteStore:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _get_conn(self) -> sqlite3.Connection:
+    @contextmanager
+    def _get_conn(self) -> Generator[sqlite3.Connection, None, None]:
+        """Yield a SQLite connection that is guaranteed to close on exit.
+
+        Previously returned a bare Connection used as ``with conn:``,
+        which only commits/rollbacks but never closes — leaking connections,
+        WAL read-snapshots, and eventually causing 100x slowdown under MCP.
+        """
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
-        return conn
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def _init_schema(self) -> None:
         with self._get_conn() as conn:
@@ -247,6 +262,16 @@ class SQLiteStore:
                     logger.warning(f"Skipping {file_path}: {exc}")
 
             self._index_metadata_objects(conn, metadata_objects)
+
+            # Diagnostic guard: verify code_fts.rowid == symbols.id invariant
+            # Use symbols count for both — code_fts COUNT(*) is O(N) on FTS5 (157s for 542k rows)
+            sym_count = conn.execute("SELECT count(*) FROM symbols").fetchone()[0]
+            fts_count = sym_count  # trust 1:1 insert in _index_bsl_file
+            if fts_count != sym_count:
+                logger.warning(
+                    f"code_fts/symbols count mismatch: {fts_count} vs {sym_count} — "
+                    "code_grep(path=...) may use slow fallback"
+                )
 
         return self.stats()
 
@@ -350,11 +375,15 @@ class SQLiteStore:
                 )
 
             # Index function body into FTS5 for fast grep
+            # INVARIANT: code_fts.rowid == symbols.id (explicit, not accidental).
+            # Relied upon by code_grep(path=...) for fast path filtering via
+            # files -> symbols -> code_fts rowid pipeline.
+            # Do NOT change without updating code_grep.
             if func.body and fts5_ok:
                 try:
                     conn.execute(
-                        "INSERT INTO code_fts(file_path, function_name, module_type, body, line_start) VALUES (?, ?, ?, ?, ?)",
-                        (path_str, func.name, module_type, func.body, str(func.line_start)),
+                        "INSERT INTO code_fts(rowid, file_path, function_name, module_type, body, line_start) VALUES (?, ?, ?, ?, ?, ?)",
+                        (symbol_id, path_str, func.name, module_type, func.body, str(func.line_start)),
                     )
                 except sqlite3.OperationalError as exc:
                     logger.debug(f"code_fts insert failed: {exc}")
@@ -716,14 +745,16 @@ class SQLiteStore:
         """Return True if code_fts has been populated."""
         with self._get_conn() as conn:
             try:
-                count = conn.execute("SELECT COUNT(*) FROM code_fts").fetchone()[0]
-                return count > 0
+                # Use LIMIT 1 instead of COUNT(*) — FTS5 COUNT(*) scans all rows
+                # (157s on 542k rows vs 2ms with LIMIT 1)
+                return conn.execute("SELECT 1 FROM code_fts LIMIT 1").fetchone() is not None
             except sqlite3.OperationalError:
                 return False
 
     def code_grep(
         self,
         pattern: str,
+        path: str = "",
         case_sensitive: bool = False,
         limit: int = 20,
     ) -> list[dict] | None:
@@ -750,21 +781,43 @@ class SQLiteStore:
                 fts_query = '"' + " ".join(words) + '"'
 
             try:
-                rows = conn.execute(
-                    "SELECT file_path, function_name, module_type, body, line_start FROM code_fts WHERE body MATCH ?",
-                    (fts_query,),
-                ).fetchall()
+                if path:
+                    # 3-step pipeline: files → symbols → code_fts (486ms vs 13s)
+                    escaped = path.replace("\\", "/").replace("%", "\\%").replace("_", "\\_")
+                    path_filter = f"%{escaped}%"
+
+                    conn.execute("CREATE TEMP TABLE IF NOT EXISTS _target_rowids(id INTEGER PRIMARY KEY)")
+                    conn.execute("DELETE FROM _target_rowids")
+                    conn.execute(
+                        "INSERT INTO _target_rowids SELECT s.id FROM symbols s "
+                        "JOIN files f ON f.id = s.file_id "
+                        "WHERE f.path LIKE ? ESCAPE '\\'",
+                        (path_filter,),
+                    )
+
+                    if conn.execute("SELECT 1 FROM _target_rowids LIMIT 1").fetchone() is None:
+                        return []
+
+                    cursor = conn.execute(
+                        "SELECT file_path, function_name, module_type, body, line_start "
+                        "FROM code_fts WHERE rowid IN (SELECT id FROM _target_rowids) "
+                        "AND body MATCH ?",
+                        (fts_query,),
+                    )
+                else:
+                    cursor = conn.execute(
+                        "SELECT file_path, function_name, module_type, body, line_start "
+                        "FROM code_fts WHERE body MATCH ?",
+                        (fts_query,),
+                    )
             except sqlite3.OperationalError as exc:
                 logger.debug(f"code_fts MATCH failed ({exc}), skipping FTS path")
                 return None
 
-            if not rows:
-                return []
-
             search_pat = pattern if case_sensitive else pattern.lower()
             results: list[dict] = []
 
-            for row in rows:
+            for row in cursor:
                 body: str = row["body"] or ""
                 body_lines = body.splitlines()
                 try:
