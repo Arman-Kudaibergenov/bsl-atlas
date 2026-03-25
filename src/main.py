@@ -9,6 +9,7 @@ Dual-layer architecture:
 import asyncio
 import json
 import logging
+import os
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -25,7 +26,7 @@ from .storage.sqlite_store import SQLiteStore
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
@@ -530,7 +531,7 @@ def search_code_filtered(
 
 
 @mcp.tool()
-def code_grep(pattern: str, case_sensitive: bool = False, limit: int = 20) -> list[dict]:
+def code_grep(pattern: str, path: str = "", case_sensitive: bool = False, limit: int = 20) -> list[dict]:
     """Search for text pattern in BSL code with AST context.
 
     Unlike regular grep, returns matches with structural context:
@@ -541,6 +542,8 @@ def code_grep(pattern: str, case_sensitive: bool = False, limit: int = 20) -> li
 
     Args:
         pattern: Text pattern to search (substring match, not regex)
+        path: Filter results by file path substring (e.g. "Documents/РеализацияТоваров"
+              or "CommonModules"). Empty string means no filter.
         case_sensitive: Whether search is case-sensitive (default: False)
         limit: Maximum results to return (default: 20)
 
@@ -554,7 +557,7 @@ def code_grep(pattern: str, case_sensitive: bool = False, limit: int = 20) -> li
     """
     # Fast path: FTS5 index (instant)
     if sqlite_store and sqlite_store.has_code_fts():
-        results = sqlite_store.code_grep(pattern, case_sensitive=case_sensitive, limit=limit)
+        results = sqlite_store.code_grep(pattern, path=path, case_sensitive=case_sensitive, limit=limit)
         if results is not None:
             return results
 
@@ -567,6 +570,7 @@ def code_grep(pattern: str, case_sensitive: bool = False, limit: int = 20) -> li
     return _code_grep.search(
         pattern=pattern,
         source_path=source,
+        path=path,
         case_sensitive=case_sensitive,
         limit=limit,
     )

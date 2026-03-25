@@ -340,7 +340,7 @@ class CodeParser:
         content = self._read_file(file_path)
 
         if not content:
-            logger.warning(f"Empty or unreadable file: {file_path}")
+            logger.debug(f"Empty or unreadable file: {file_path}")
             return []
 
         object_path = self._extract_object_path(file_path)
