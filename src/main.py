@@ -273,11 +273,15 @@ def get_module_functions(module_path: str) -> list[dict]:
 def get_function_context(function_name: str) -> dict:
     """Get call graph context for a function: what it calls and who calls it.
 
+    Accepts ONLY the function name — no file path, no module path.
+    The function is looked up globally across all indexed modules.
+
     Args:
-        function_name: Name of the function (e.g. "ПровестиДокумент")
+        function_name: Exact name of the function/procedure (e.g. "ПровестиДокумент").
+                       Do NOT pass a file path here — only the function name.
 
     Returns:
-        Dict with function info, list of called functions, and list of callers
+        Dict with function info (including its module_path), list of called functions, and list of callers
     """
     if not sqlite_store:
         return {"error": "SQLite store not initialized"}
