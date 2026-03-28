@@ -134,7 +134,7 @@ class HelpParser:
         html_content = self._read_file(file_path)
 
         if not html_content:
-            logger.warning(f"Empty or unreadable file: {file_path}")
+            logger.debug(f"Empty or unreadable file: {file_path}")
             return []
 
         try:

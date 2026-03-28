@@ -49,7 +49,12 @@ class Config:
     
     # Model settings
     embedding_model: str | None = field(default_factory=lambda: os.getenv("EMBEDDING_MODEL") or None)
-    openai_api_base: str | None = field(default_factory=lambda: os.getenv("OPENAI_API_BASE") or None)
+    openai_api_base: str | None = field(
+        default_factory=lambda: os.getenv("OPENAI_API_BASE") or os.getenv("OPENAI_BASE_URL") or os.getenv("EMBEDDING_BASE_URL") or None
+    )
+
+    # MCP transport
+    mcp_transport: str = field(default_factory=lambda: os.getenv("MCP_TRANSPORT", "streamable-http"))
     
     # Indexing settings
     auto_index: bool = field(default_factory=lambda: os.getenv("AUTO_INDEX", "true").lower() == "true")
@@ -71,6 +76,9 @@ class Config:
     # SQLite structural layer
     sqlite_db_path: Path = field(default_factory=lambda: Path(os.getenv("SQLITE_DB_PATH", "/data/bsl_index.db")))
     sqlite_auto_rebuild: bool = field(default_factory=lambda: os.getenv("SQLITE_AUTO_REBUILD", "true").lower() == "true")
+
+    # Reranker (optional cross-encoder)
+    reranker_url: str = field(default_factory=lambda: os.getenv("RERANKER_URL", ""))
 
     # Indexing mode: fast (SQLite only, no ChromaDB) or full (SQLite + ChromaDB vectors)
     indexing_mode: IndexingMode = field(
@@ -110,19 +118,24 @@ class Config:
 
         # In fast mode, skip ChromaDB provider validation (not used)
         if self.indexing_mode == "full":
+            # Skip API key validation for providers using custom base_url (local models)
+            has_custom_base = bool(self.openai_api_base)
+
             # Validate indexing provider
             if self.indexing_provider not in ("ollama", "local") and not self.get_api_key(self.indexing_provider):
-                errors.append(
-                    f"API key required for indexing provider '{self.indexing_provider}'. "
-                    f"Set {self.indexing_provider.upper()}_API_KEY environment variable."
-                )
+                if not (self.indexing_provider == "openai" and has_custom_base):
+                    errors.append(
+                        f"API key required for indexing provider '{self.indexing_provider}'. "
+                        f"Set {self.indexing_provider.upper()}_API_KEY environment variable."
+                    )
 
             # Validate search provider
             if self.search_provider not in ("ollama", "local") and not self.get_api_key(self.search_provider):
-                errors.append(
-                    f"API key required for search provider '{self.search_provider}'. "
-                    f"Set {self.search_provider.upper()}_API_KEY environment variable."
-                )
+                if not (self.search_provider == "openai" and has_custom_base):
+                    errors.append(
+                        f"API key required for search provider '{self.search_provider}'. "
+                        f"Set {self.search_provider.upper()}_API_KEY environment variable."
+                    )
 
         if not self.source_path.exists():
             errors.append(f"Source path does not exist: {self.source_path}")

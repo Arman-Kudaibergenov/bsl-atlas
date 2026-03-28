@@ -9,6 +9,7 @@ Dual-layer architecture:
 import asyncio
 import json
 import logging
+import os
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -25,7 +26,7 @@ from .storage.sqlite_store import SQLiteStore
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
@@ -732,8 +733,16 @@ def main():
 
     logger.info(f"Starting MCP server on {config.host}:{config.port}")
 
+    transport = config.mcp_transport
+    if transport == "sse":
+        app = mcp.sse_app()
+    else:
+        app = mcp.http_app()
+
+    logger.info(f"MCP transport: {transport}")
+
     uvicorn.run(
-        mcp.http_app(),
+        app,
         host=config.host,
         port=config.port,
         log_level="info",

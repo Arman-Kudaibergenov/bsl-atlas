@@ -557,10 +557,10 @@ def create_embedding_provider(
 
     match provider:
         case "openai":
-            if not api_key:
-                raise ValueError("OPENAI_API_KEY is required for OpenAI embeddings")
+            if not api_key and not base_url:
+                raise ValueError("OPENAI_API_KEY is required for OpenAI embeddings (not needed with custom OPENAI_BASE_URL)")
             primary = OpenAIEmbeddings(
-                api_key=api_key,
+                api_key=api_key or "local",
                 model=resolved_model or "text-embedding-3-small",
                 base_url=base_url,
             )
