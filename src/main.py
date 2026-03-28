@@ -38,33 +38,14 @@ sqlite_store: SQLiteStore | None = None
 _code_grep = CodeGrep()
 
 
-def _check_source_path(source: Path) -> str | None:
-    """Check SOURCE_PATH and return a diagnostic message if something is wrong, or None if OK."""
-    if not source.exists():
-        return (
-            f"SOURCE_PATH does not exist: {source}. "
-            "If running in Docker, check that the host path in SOURCE_PATH is correct "
-            "and accessible. Paths with spaces or non-ASCII characters (e.g. Cyrillic) "
-            "may require quoting in .env: SOURCE_PATH=\"C:/path with spaces/config\""
-        )
-    if source.is_dir() and not any(source.iterdir()):
-        return (
-            f"SOURCE_PATH is empty: {source}. "
-            "The directory exists but contains no files — the Docker volume mount may have failed. "
-            "Check that your host path exists and Docker Desktop has access to it."
-        )
-    return None
-
-
 def _rebuild_sqlite():
     """Scan source_path and rebuild SQLite structural index."""
     if not sqlite_store:
         return
 
     source = config.source_path
-    diag = _check_source_path(source)
-    if diag:
-        logger.warning(f"{diag} — skipping SQLite rebuild")
+    if not source.exists():
+        logger.warning(f"SOURCE_PATH does not exist: {source}, skipping SQLite rebuild")
         return
 
     logger.info(f"Rebuilding SQLite index from {source}")
@@ -561,9 +542,8 @@ def code_grep(pattern: str, case_sensitive: bool = False, limit: int = 20) -> li
 
     # Fallback: file scanning (slow, used when index not yet built)
     source = config.source_path
-    diag = _check_source_path(source)
-    if diag:
-        return [{"error": diag}]
+    if not source.exists():
+        return [{"error": f"SOURCE_PATH does not exist: {source}"}]
 
     return _code_grep.search(
         pattern=pattern,

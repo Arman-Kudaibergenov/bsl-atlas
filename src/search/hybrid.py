@@ -93,7 +93,7 @@ class HybridSearch:
             help_collection: ChromaDB collection for help
             search_embedding_provider: Optional separate embedding provider for search queries.
                 If provided, will be used instead of collection's embedding function.
-            reranker_url: Optional URL of cross-encoder reranker service (e.g. http://reranker-host:8400).
+            reranker_url: Optional URL of cross-encoder reranker service (e.g. http://192.168.0.108:8400).
                 If set, search results will be re-ranked before returning.
         """
         self.metadata_collection = metadata_collection

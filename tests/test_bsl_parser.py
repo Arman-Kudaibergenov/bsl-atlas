@@ -203,17 +203,17 @@ def test_object_name_extraction():
 
 
 def test_real_file():
-    """Test parsing a real BSL file from an optional local sample directory."""
+    """Test parsing a real BSL file from MinimKG."""
     parser = BSLParser()
     
-    # Optional local sample path for manual smoke runs.
-    sample_root = Path("sample-src")
-    if not sample_root.exists():
-        print("[SKIP] test_real_file skipped (sample-src not found)")
+    # Find a real BSL file
+    minimkg_path = Path(r"C:\Users\Arman\workspace\MinimKG\src\cf")
+    if not minimkg_path.exists():
+        print("[SKIP] test_real_file skipped (MinimKG not found)")
         return
     
     # Find first BSL file
-    bsl_files = list(sample_root.rglob("*.bsl"))
+    bsl_files = list(minimkg_path.rglob("*.bsl"))
     if not bsl_files:
         print("[SKIP] test_real_file skipped (no BSL files found)")
         return
