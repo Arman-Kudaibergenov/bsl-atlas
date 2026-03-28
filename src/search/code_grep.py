@@ -135,6 +135,7 @@ class CodeGrep:
         self,
         pattern: str,
         source_path: Path,
+        path: str = "",
         case_sensitive: bool = False,
         limit: int = 20,
         max_workers: int = 8,
@@ -144,6 +145,7 @@ class CodeGrep:
         Args:
             pattern: Substring to search for.
             source_path: Root directory with .bsl files.
+            path: Filter by file path substring (e.g. "Documents/Реализация").
             case_sensitive: If False (default), performs case-insensitive search.
             limit: Maximum matches to return.
             max_workers: Thread pool size for parallel file scanning.
@@ -155,6 +157,14 @@ class CodeGrep:
             return []
 
         bsl_files = list(source_path.rglob("*.bsl"))
+
+        if path:
+            path_lower = path.replace("\\", "/").lower()
+            bsl_files = [
+                f for f in bsl_files
+                if path_lower in str(f.relative_to(source_path)).replace("\\", "/").lower()
+            ]
+
         if not bsl_files:
             logger.warning(f"No .bsl files found in {source_path}")
             return []
