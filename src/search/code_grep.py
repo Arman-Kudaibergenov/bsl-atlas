@@ -90,8 +90,8 @@ def _grep_file(
     except OSError:
         return []
 
-    search_text = text if case_sensitive else text.lower()
-    search_pat = pattern if case_sensitive else pattern.lower()
+    search_text = text if case_sensitive else text.casefold()
+    search_pat = pattern if case_sensitive else pattern.casefold()
 
     if search_pat not in search_text:
         return []
@@ -102,7 +102,7 @@ def _grep_file(
 
     matches: list[dict[str, Any]] = []
     for line_no, line in enumerate(lines, start=1):
-        check = line if case_sensitive else line.lower()
+        check = line if case_sensitive else line.casefold()
         if search_pat not in check:
             continue
 
@@ -159,10 +159,10 @@ class CodeGrep:
         bsl_files = list(source_path.rglob("*.bsl"))
 
         if path:
-            path_lower = path.replace("\\", "/").lower()
+            path_cf = path.replace("\\", "/").casefold()
             bsl_files = [
                 f for f in bsl_files
-                if path_lower in str(f.relative_to(source_path)).replace("\\", "/").lower()
+                if path_cf in str(f.relative_to(source_path)).replace("\\", "/").casefold()
             ]
 
         if not bsl_files:

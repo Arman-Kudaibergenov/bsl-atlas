@@ -99,7 +99,7 @@ def _extract_calls(func_node, src: bytes, func_name_lower: str) -> list[str]:
                         break
             if name_node:
                 name = _text(name_node, src)
-                nl = name.lower()
+                nl = name.casefold()
                 if nl not in _KEYWORDS_LOWER and nl != func_name_lower and name not in seen:
                     seen.add(name)
                     calls.append(name)
@@ -141,7 +141,7 @@ def parse_functions(file_path: Path, src: bytes) -> list[dict[str, Any]] | None:
                 func_type = "Функция" if "function" in node.type else "Процедура"
                 params = _extract_params(node.child_by_field_name("parameters"), src)
                 is_export = node.child_by_field_name("export") is not None
-                calls = _extract_calls(node, src, name.lower())
+                calls = _extract_calls(node, src, name.casefold())
                 body = _text(node, src)
                 line_start = node.start_point[0] + 1
                 line_end = node.end_point[0] + 1

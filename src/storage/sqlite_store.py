@@ -45,6 +45,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS code_fts USING fts5(
 CREATE TABLE IF NOT EXISTS files (
     id INTEGER PRIMARY KEY,
     path TEXT UNIQUE NOT NULL,
+    path_lower TEXT NOT NULL DEFAULT '',
     file_hash TEXT NOT NULL,
     module_type TEXT,
     indexed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -54,6 +55,7 @@ CREATE TABLE IF NOT EXISTS symbols (
     id INTEGER PRIMARY KEY,
     file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
+    name_lower TEXT NOT NULL DEFAULT '',
     type TEXT NOT NULL,
     params TEXT,
     is_export INTEGER DEFAULT 0,
@@ -71,15 +73,19 @@ CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(
 CREATE TABLE IF NOT EXISTS calls (
     caller_id INTEGER NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
     callee_name TEXT NOT NULL,
+    callee_name_lower TEXT NOT NULL DEFAULT '',
     PRIMARY KEY(caller_id, callee_name)
 );
 
 CREATE TABLE IF NOT EXISTS objects (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
+    name_lower TEXT NOT NULL DEFAULT '',
     object_type TEXT NOT NULL,
     synonym TEXT,
-    full_name TEXT UNIQUE NOT NULL
+    synonym_lower TEXT NOT NULL DEFAULT '',
+    full_name TEXT UNIQUE NOT NULL,
+    full_name_lower TEXT NOT NULL DEFAULT ''
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS objects_fts USING fts5(
@@ -120,10 +126,15 @@ CREATE TABLE IF NOT EXISTS register_movements (
 );
 
 CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
+CREATE INDEX IF NOT EXISTS idx_symbols_name_lower ON symbols(name_lower);
 CREATE INDEX IF NOT EXISTS idx_symbols_file_id ON symbols(file_id);
 CREATE INDEX IF NOT EXISTS idx_calls_caller ON calls(caller_id);
 CREATE INDEX IF NOT EXISTS idx_calls_callee ON calls(callee_name);
+CREATE INDEX IF NOT EXISTS idx_calls_callee_lower ON calls(callee_name_lower);
 CREATE INDEX IF NOT EXISTS idx_objects_name ON objects(name);
+CREATE INDEX IF NOT EXISTS idx_objects_name_lower ON objects(name_lower);
+CREATE INDEX IF NOT EXISTS idx_objects_full_name_lower ON objects(full_name_lower);
+CREATE INDEX IF NOT EXISTS idx_files_path_lower ON files(path_lower);
 CREATE INDEX IF NOT EXISTS idx_attributes_object ON attributes(object_id);
 CREATE INDEX IF NOT EXISTS idx_attributes_type_ref ON attributes(type_ref);
 """
@@ -326,8 +337,8 @@ class SQLiteStore:
         module_type = functions[0].module_type if functions else "Module"
 
         conn.execute(
-            "INSERT OR REPLACE INTO files (path, file_hash, module_type) VALUES (?, ?, ?)",
-            (path_str, file_hash, module_type),
+            "INSERT OR REPLACE INTO files (path, path_lower, file_hash, module_type) VALUES (?, ?, ?, ?)",
+            (path_str, path_str.casefold(), file_hash, module_type),
         )
         file_id: int = conn.execute(
             "SELECT id FROM files WHERE path = ?", (path_str,)
@@ -339,11 +350,12 @@ class SQLiteStore:
             params_json = json.dumps(func.params)
             conn.execute(
                 """INSERT OR IGNORE INTO symbols
-                   (file_id, name, type, params, is_export, line_start, line_end)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                   (file_id, name, name_lower, type, params, is_export, line_start, line_end)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     file_id,
                     func.name,
+                    func.name.casefold(),
                     func.type,
                     params_json,
                     1 if func.is_export else 0,
@@ -370,8 +382,8 @@ class SQLiteStore:
 
             for callee in func.calls:
                 conn.execute(
-                    "INSERT OR IGNORE INTO calls (caller_id, callee_name) VALUES (?, ?)",
-                    (symbol_id, callee),
+                    "INSERT OR IGNORE INTO calls (caller_id, callee_name, callee_name_lower) VALUES (?, ?, ?)",
+                    (symbol_id, callee, callee.casefold()),
                 )
 
             # Index function body into FTS5 for fast grep
@@ -400,9 +412,15 @@ class SQLiteStore:
         for obj in metadata_objects:
             full_name = f"{obj.object_type}.{obj.name}"
             conn.execute(
-                """INSERT OR REPLACE INTO objects (name, object_type, synonym, full_name)
-                   VALUES (?, ?, ?, ?)""",
-                (obj.name, obj.object_type, obj.synonym, full_name),
+                """INSERT OR REPLACE INTO objects
+                   (name, name_lower, object_type, synonym, synonym_lower, full_name, full_name_lower)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    obj.name, obj.name.casefold(),
+                    obj.object_type,
+                    obj.synonym, (obj.synonym or "").casefold(),
+                    full_name, full_name.casefold(),
+                ),
             )
             object_id: int = conn.execute(
                 "SELECT id FROM objects WHERE full_name = ?", (full_name,)
@@ -471,8 +489,8 @@ class SQLiteStore:
                     """SELECT s.*, f.path, f.module_type
                        FROM symbols s
                        JOIN files f ON s.file_id = f.id
-                       WHERE s.name = ? COLLATE NOCASE""",
-                    (name,),
+                       WHERE s.name_lower = ?""",
+                    (name.casefold(),),
                 ).fetchall()
                 return [_row_to_function_info(r) for r in rows]
 
@@ -490,16 +508,18 @@ class SQLiteStore:
                            )""",
                         (fts_query,),
                     ).fetchall()
-                    return [_row_to_function_info(r) for r in rows]
+                    if rows:
+                        return [_row_to_function_info(r) for r in rows]
                 except sqlite3.OperationalError as exc:
                     logger.debug(f"FTS5 search failed, falling back to LIKE: {exc}")
 
+            # LIKE fallback on name_lower (handles FTS5 empty result too)
             rows = conn.execute(
                 """SELECT s.*, f.path, f.module_type
                    FROM symbols s
                    JOIN files f ON s.file_id = f.id
-                   WHERE s.name LIKE ? COLLATE NOCASE""",
-                (f"%{name}%",),
+                   WHERE s.name_lower LIKE ?""",
+                (f"%{name.casefold()}%",),
             ).fetchall()
             return [_row_to_function_info(r) for r in rows]
 
@@ -510,9 +530,9 @@ class SQLiteStore:
                 """SELECT s.*, f.path, f.module_type
                    FROM symbols s
                    JOIN files f ON s.file_id = f.id
-                   WHERE f.path = ?
+                   WHERE f.path_lower = ?
                    ORDER BY s.line_start""",
-                (module_path,),
+                (module_path.casefold(),),
             ).fetchall()
 
             if not rows:
@@ -520,9 +540,9 @@ class SQLiteStore:
                     """SELECT s.*, f.path, f.module_type
                        FROM symbols s
                        JOIN files f ON s.file_id = f.id
-                       WHERE f.path LIKE ?
+                       WHERE f.path_lower LIKE ?
                        ORDER BY s.line_start""",
-                    (f"%{module_path}%",),
+                    (f"%{module_path.casefold()}%",),
                 ).fetchall()
 
             return [_row_to_function_info(r) for r in rows]
@@ -534,9 +554,9 @@ class SQLiteStore:
                 """SELECT s.*, f.path, f.module_type
                    FROM symbols s
                    JOIN files f ON s.file_id = f.id
-                   WHERE s.name = ? COLLATE NOCASE
+                   WHERE s.name_lower = ?
                    LIMIT 1""",
-                (function_name,),
+                (function_name.casefold(),),
             ).fetchone()
 
             if sym_row is None:
@@ -555,8 +575,8 @@ class SQLiteStore:
                 """SELECT DISTINCT s.name
                    FROM calls c
                    JOIN symbols s ON c.caller_id = s.id
-                   WHERE c.callee_name = ? COLLATE NOCASE""",
-                (function_name,),
+                   WHERE c.callee_name_lower = ?""",
+                (function_name.casefold(),),
             ).fetchall()
             called_by = [r["name"] for r in called_by_rows]
 
@@ -587,13 +607,14 @@ class SQLiteStore:
                     logger.debug(f"FTS5 metadata search failed, falling back to LIKE: {exc}")
                     rows = None
 
-            if rows is None:
-                like_pattern = f"%{query}%"
+            # FTS5 empty result ([] not None) → fall through to LIKE on _lower columns
+            if not rows:
+                like_pattern = f"%{query.casefold()}%"
                 rows = conn.execute(
                     """SELECT * FROM objects
-                       WHERE name LIKE ?
-                          OR synonym LIKE ?
-                          OR full_name LIKE ?
+                       WHERE name_lower LIKE ?
+                          OR synonym_lower LIKE ?
+                          OR full_name_lower LIKE ?
                        LIMIT ?""",
                     (like_pattern, like_pattern, like_pattern, limit),
                 ).fetchall()
@@ -613,15 +634,15 @@ class SQLiteStore:
         """Return full attribute/tab-part details for a metadata object."""
         with self._get_conn() as conn:
             obj_row = conn.execute(
-                "SELECT * FROM objects WHERE full_name = ?", (full_name,)
+                "SELECT * FROM objects WHERE full_name_lower = ?", (full_name.casefold(),)
             ).fetchone()
 
             if obj_row is None:
                 # Try partial match on name alone
                 name_part = full_name.split(".")[-1] if "." in full_name else full_name
                 obj_row = conn.execute(
-                    "SELECT * FROM objects WHERE name = ? COLLATE NOCASE LIMIT 1",
-                    (name_part,),
+                    "SELECT * FROM objects WHERE name_lower = ? LIMIT 1",
+                    (name_part.casefold(),),
                 ).fetchone()
 
             if obj_row is None:
@@ -762,14 +783,15 @@ class SQLiteStore:
 
         Returns list of match dicts (same schema as CodeGrep.search),
         or None if code_fts is not populated (caller should fall back).
+
+        Strategy: FTS5 MATCH first (instant), then LIKE fallback on body
+        if FTS5 returns 0 rows (handles CamelCase suffixes that FTS5
+        unicode61 tokenizer can't find via prefix search).
         """
         if not pattern:
             return []
 
         with self._get_conn() as conn:
-            # Build FTS5 query from the pattern:
-            # extract word tokens, use first word as prefix for narrowing,
-            # then do exact substring match on the returned bodies.
             words = re.findall(r"[А-Яа-яёЁA-Za-z0-9_]+", pattern)
             if not words:
                 return []
@@ -777,27 +799,30 @@ class SQLiteStore:
             if len(words) == 1:
                 fts_query = words[0] + "*"
             else:
-                # Phrase: all words must appear in sequence
                 fts_query = '"' + " ".join(words) + '"'
 
+            # Prepare path filter (shared by FTS5 and LIKE paths)
+            has_path = bool(path)
+            if has_path:
+                escaped = path.replace("\\", "/").replace("%", "\\%").replace("_", "\\_")
+                path_filter = f"%{escaped}%"
+
+                conn.execute("CREATE TEMP TABLE IF NOT EXISTS _target_rowids(id INTEGER PRIMARY KEY)")
+                conn.execute("DELETE FROM _target_rowids")
+                conn.execute(
+                    "INSERT INTO _target_rowids SELECT s.id FROM symbols s "
+                    "JOIN files f ON f.id = s.file_id "
+                    "WHERE f.path LIKE ? ESCAPE '\\'",
+                    (path_filter,),
+                )
+
+                if conn.execute("SELECT 1 FROM _target_rowids LIMIT 1").fetchone() is None:
+                    return []
+
+            # --- FTS5 path (fast) ---
+            cursor = None
             try:
-                if path:
-                    # 3-step pipeline: files → symbols → code_fts (486ms vs 13s)
-                    escaped = path.replace("\\", "/").replace("%", "\\%").replace("_", "\\_")
-                    path_filter = f"%{escaped}%"
-
-                    conn.execute("CREATE TEMP TABLE IF NOT EXISTS _target_rowids(id INTEGER PRIMARY KEY)")
-                    conn.execute("DELETE FROM _target_rowids")
-                    conn.execute(
-                        "INSERT INTO _target_rowids SELECT s.id FROM symbols s "
-                        "JOIN files f ON f.id = s.file_id "
-                        "WHERE f.path LIKE ? ESCAPE '\\'",
-                        (path_filter,),
-                    )
-
-                    if conn.execute("SELECT 1 FROM _target_rowids LIMIT 1").fetchone() is None:
-                        return []
-
+                if has_path:
                     cursor = conn.execute(
                         "SELECT file_path, function_name, module_type, body, line_start "
                         "FROM code_fts WHERE rowid IN (SELECT id FROM _target_rowids) "
@@ -814,45 +839,69 @@ class SQLiteStore:
                 logger.debug(f"code_fts MATCH failed ({exc}), skipping FTS path")
                 return None
 
-            search_pat = pattern if case_sensitive else pattern.lower()
-            results: list[dict] = []
+            results = self._grep_cursor(cursor, pattern, case_sensitive, limit)
 
-            for row in cursor:
-                body: str = row["body"] or ""
-                body_lines = body.splitlines()
-                try:
-                    line_start = int(row["line_start"])
-                except (ValueError, TypeError):
-                    line_start = 1
+            # --- LIKE fallback when FTS5 returns 0 rows ---
+            if not results:
+                logger.debug(f"code_grep: FTS5 returned 0 for '{pattern}', trying LIKE fallback")
+                if has_path:
+                    cursor = conn.execute(
+                        "SELECT file_path, function_name, module_type, body, line_start "
+                        "FROM code_fts WHERE rowid IN (SELECT id FROM _target_rowids)",
+                    )
+                else:
+                    cursor = conn.execute(
+                        "SELECT file_path, function_name, module_type, body, line_start "
+                        "FROM code_fts",
+                    )
+                results = self._grep_cursor(cursor, pattern, case_sensitive, limit)
 
-                for i, line in enumerate(body_lines):
-                    check = line if case_sensitive else line.lower()
-                    if search_pat not in check:
-                        continue
+            results.sort(key=lambda r: (r["file"], r["line"]))
+            return results[:limit]
 
-                    abs_line = line_start + i
+    @staticmethod
+    def _grep_cursor(
+        cursor, pattern: str, case_sensitive: bool, limit: int,
+    ) -> list[dict]:
+        """Scan cursor rows for substring matches in body, return match dicts."""
+        search_pat = pattern if case_sensitive else pattern.casefold()
+        results: list[dict] = []
 
-                    ctx_start = max(0, i - 2)
-                    ctx_end = min(len(body_lines), i + 3)
-                    context = "\n".join(body_lines[ctx_start:ctx_end])
+        for row in cursor:
+            body: str = row["body"] or ""
+            body_lines = body.splitlines()
+            try:
+                line_start = int(row["line_start"])
+            except (ValueError, TypeError):
+                line_start = 1
 
-                    results.append({
-                        "file": row["file_path"],
-                        "line": abs_line,
-                        "text": line.strip(),
-                        "function": row["function_name"],
-                        "module_type": row["module_type"],
-                        "context": context,
-                    })
+            for i, line in enumerate(body_lines):
+                check = line if case_sensitive else line.casefold()
+                if search_pat not in check:
+                    continue
 
-                    if len(results) >= limit:
-                        break
+                abs_line = line_start + i
+
+                ctx_start = max(0, i - 2)
+                ctx_end = min(len(body_lines), i + 3)
+                context = "\n".join(body_lines[ctx_start:ctx_end])
+
+                results.append({
+                    "file": row["file_path"],
+                    "line": abs_line,
+                    "text": line.strip(),
+                    "function": row["function_name"],
+                    "module_type": row["module_type"],
+                    "context": context,
+                })
 
                 if len(results) >= limit:
                     break
 
-            results.sort(key=lambda r: (r["file"], r["line"]))
-            return results[:limit]
+            if len(results) >= limit:
+                break
+
+        return results
 
     # ------------------------------------------------------------------
     # Statistics
