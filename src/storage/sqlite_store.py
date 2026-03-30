@@ -311,10 +311,12 @@ class SQLiteStore:
                     src_idx = i
                     break
             path_str = (
-                "/".join(parts[src_idx + 1:]) if src_idx is not None else str(file_path)
+                "/".join(parts[src_idx + 1:])
+                if src_idx is not None
+                else str(file_path).replace("\\", "/")
             )
         except Exception:
-            path_str = str(file_path)
+            path_str = str(file_path).replace("\\", "/")
 
         # Skip if already up-to-date
         row = conn.execute(
@@ -804,7 +806,7 @@ class SQLiteStore:
             # Prepare path filter (shared by FTS5 and LIKE paths)
             has_path = bool(path)
             if has_path:
-                escaped = path.replace("\\", "/").replace("%", "\\%").replace("_", "\\_")
+                escaped = path.replace("\\", "/").casefold().replace("%", "\\%").replace("_", "\\_")
                 path_filter = f"%{escaped}%"
 
                 conn.execute("CREATE TEMP TABLE IF NOT EXISTS _target_rowids(id INTEGER PRIMARY KEY)")
@@ -812,7 +814,7 @@ class SQLiteStore:
                 conn.execute(
                     "INSERT INTO _target_rowids SELECT s.id FROM symbols s "
                     "JOIN files f ON f.id = s.file_id "
-                    "WHERE f.path LIKE ? ESCAPE '\\'",
+                    "WHERE f.path_lower LIKE ? ESCAPE '\\'",
                     (path_filter,),
                 )
 

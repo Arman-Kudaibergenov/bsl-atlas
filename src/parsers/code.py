@@ -223,9 +223,9 @@ class CodeParser:
             if src_idx is not None:
                 module_path = "/".join(parts[src_idx + 1:])
             else:
-                module_path = str(file_path)
+                module_path = str(file_path).replace("\\", "/")
         except Exception:
-            module_path = str(file_path)
+            module_path = str(file_path).replace("\\", "/")
 
         module_type = self._extract_module_type(file_path)
 
