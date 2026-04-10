@@ -90,8 +90,8 @@ def _grep_file(
     except OSError:
         return []
 
-    search_text = text if case_sensitive else text.lower()
-    search_pat = pattern if case_sensitive else pattern.lower()
+    search_text = text if case_sensitive else text.casefold()
+    search_pat = pattern if case_sensitive else pattern.casefold()
 
     if search_pat not in search_text:
         return []
@@ -102,7 +102,7 @@ def _grep_file(
 
     matches: list[dict[str, Any]] = []
     for line_no, line in enumerate(lines, start=1):
-        check = line if case_sensitive else line.lower()
+        check = line if case_sensitive else line.casefold()
         if search_pat not in check:
             continue
 
@@ -135,6 +135,7 @@ class CodeGrep:
         self,
         pattern: str,
         source_path: Path,
+        path: str = "",
         case_sensitive: bool = False,
         limit: int = 20,
         max_workers: int = 8,
@@ -144,6 +145,7 @@ class CodeGrep:
         Args:
             pattern: Substring to search for.
             source_path: Root directory with .bsl files.
+            path: Filter by file path substring (e.g. "Documents/Реализация").
             case_sensitive: If False (default), performs case-insensitive search.
             limit: Maximum matches to return.
             max_workers: Thread pool size for parallel file scanning.
@@ -155,6 +157,14 @@ class CodeGrep:
             return []
 
         bsl_files = list(source_path.rglob("*.bsl"))
+
+        if path:
+            path_cf = path.replace("\\", "/").casefold()
+            bsl_files = [
+                f for f in bsl_files
+                if path_cf in str(f.relative_to(source_path)).replace("\\", "/").casefold()
+            ]
+
         if not bsl_files:
             logger.warning(f"No .bsl files found in {source_path}")
             return []

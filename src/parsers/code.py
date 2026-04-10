@@ -223,9 +223,9 @@ class CodeParser:
             if src_idx is not None:
                 module_path = "/".join(parts[src_idx + 1:])
             else:
-                module_path = str(file_path)
+                module_path = str(file_path).replace("\\", "/")
         except Exception:
-            module_path = str(file_path)
+            module_path = str(file_path).replace("\\", "/")
 
         module_type = self._extract_module_type(file_path)
 
@@ -233,7 +233,7 @@ class CodeParser:
         ts_results = tree_sitter_parser.parse_functions(
             file_path, content.encode("utf-8", errors="replace")
         )
-        if ts_results is not None:
+        if ts_results:
             return [
                 BSLFunction(
                     name=f["name"],
@@ -301,12 +301,12 @@ class CodeParser:
             # Extract calls from body
             calls = []
             seen = set()
-            func_name_lower = func["name"].lower()
+            func_name_cf = func["name"].casefold()
             for call_match in self._CALL_PATTERN.finditer(body):
                 name = call_match.group(1)
                 if name in self._BSL_KEYWORDS:
                     continue
-                if name.lower() == func_name_lower:
+                if name.casefold() == func_name_cf:
                     continue
                 if name not in seen:
                     seen.add(name)

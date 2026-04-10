@@ -571,44 +571,105 @@ class VectorIndexer:
     # ChromaDB has a limit of ~5461 documents per add() call
     CHROMA_MAX_BATCH = 5000
 
+    @staticmethod
+    def _make_chunk_id(collection_name: str, chunk: dict[str, Any]) -> str:
+        """Build a deterministic chunk ID from its metadata.
+
+        The ID is stable across restarts regardless of chunk ordering
+        or sub-batch boundaries.
+        """
+        meta = chunk["metadata"]
+        parts = [
+            collection_name,
+            meta.get("source_file", ""),
+            meta.get("full_path", ""),
+            meta.get("name", ""),
+            str(meta.get("chunk_index", 0)),
+        ]
+        fn_name = chunk.get("_function_name")
+        if fn_name:
+            parts.append(fn_name)
+        key = "|".join(parts)
+        return hashlib.sha256(key.encode("utf-8")).hexdigest()[:24]
+
     def _batch_index_chunks(
         self,
         collection: chromadb.Collection,
         chunks: list[dict[str, Any]],
         collection_name: str,
-        id_prefix: str,
     ) -> int:
         """Index a batch of chunks with embedding, respecting ChromaDB limits.
-        
+
+        Uses deterministic chunk IDs and incremental file marking so that
+        already-completed files survive a mid-batch restart.
+
         Args:
             collection: ChromaDB collection
             chunks: List of chunks to index
             collection_name: Collection name for file tracking
-            id_prefix: Prefix for document IDs
-            
+
         Returns:
             Number of indexed chunks
         """
         if not chunks:
             return 0
             
-        # Extract unique files for tracking
-        files_to_mark = set()
+        # Extract unique source files for tracking
+        source_files: set[str] = set()
         for chunk in chunks:
-            if "_file_path" in chunk:
-                files_to_mark.add(chunk["_file_path"])
-        
+            sf = chunk["metadata"].get("source_file")
+            if sf:
+                source_files.add(sf)
+
+        # Remove stale vectors for files about to be re-indexed
+        for sf in source_files:
+            try:
+                existing = collection.get(where={"source_file": sf}, include=[])
+                if existing and existing["ids"]:
+                    collection.delete(ids=existing["ids"])
+                    logger.debug(
+                        f"Cleaned {len(existing['ids'])} old vectors for {sf} "
+                        f"from {collection.name}"
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to clean old vectors for {sf}: {e}")
+
+        # Pre-compute expected chunk counts per file and per function
+        chunks_per_file: dict[str, int] = {}
+        chunks_per_function: dict[tuple, int] = {}
+        function_info: dict[tuple, dict] = {}
+        for chunk in chunks:
+            sf = chunk["metadata"].get("source_file", "")
+            chunks_per_file[sf] = chunks_per_file.get(sf, 0) + 1
+            if "_function_path" in chunk:
+                fkey = (str(chunk["_function_path"]), chunk["_function_name"])
+                chunks_per_function[fkey] = chunks_per_function.get(fkey, 0) + 1
+                if fkey not in function_info:
+                    function_info[fkey] = {
+                        "path": chunk["_function_path"],
+                        "name": chunk["_function_name"],
+                        "hash": chunk["_function_hash"],
+                    }
+
+        # Counters for incremental marking
+        indexed_per_file: dict[str, int] = {}
+        indexed_per_function: dict[tuple, int] = {}
+        marked_files: set[str] = set()
+        marked_functions: set[tuple] = set()
+
         total_indexed = 0
-        
+        consecutive_failures = 0
+
         # Split into sub-batches to respect ChromaDB limit
         for batch_idx in range(0, len(chunks), self.CHROMA_MAX_BATCH):
             batch_chunks = chunks[batch_idx:batch_idx + self.CHROMA_MAX_BATCH]
-            
-            # Prepare data for ChromaDB
-            ids = [f"{id_prefix}_{batch_idx + i}" for i in range(len(batch_chunks))]
+            sub_batch_num = batch_idx // self.CHROMA_MAX_BATCH + 1
+
+            # Prepare data for ChromaDB (deterministic IDs based on chunk metadata)
+            ids = [self._make_chunk_id(collection_name, c) for c in batch_chunks]
             contents = [chunk["content"] for chunk in batch_chunks]
             metadatas = [{k: v for k, v in chunk["metadata"].items()} for chunk in batch_chunks]
-            
+
             try:
                 # Get embeddings bypassing ChromaDB validation wrapper (may contain None)
                 embeddings = self.embedding_function.embed_raw(contents)
@@ -620,10 +681,19 @@ class VectorIndexer:
                     skipped = len(batch_chunks) - len(valid)
                     logger.warning(
                         f"Skipping {skipped} chunks with failed embeddings "
-                        f"in sub-batch {batch_idx // self.CHROMA_MAX_BATCH + 1}"
+                        f"in sub-batch {sub_batch_num}"
                     )
                 if not valid:
+                    consecutive_failures += 1
+                    if consecutive_failures >= 3:
+                        logger.error(
+                            f"Circuit breaker: {consecutive_failures} consecutive "
+                            f"sub-batches with zero valid embeddings, stopping"
+                        )
+                        break
                     continue
+
+                consecutive_failures = 0
                 valid_idx = [i for i, _ in valid]
                 collection.add(
                     ids=[ids[i] for i in valid_idx],
@@ -634,30 +704,49 @@ class VectorIndexer:
                 total_indexed += len(valid)
                 logger.info(
                     f"Batch indexed {len(valid)} chunks to {collection.name} "
-                    f"(sub-batch {batch_idx // self.CHROMA_MAX_BATCH + 1})"
+                    f"(sub-batch {sub_batch_num})"
                 )
+
+                # Incremental file/function marking: count only actually added chunks
+                for i in valid_idx:
+                    chunk = batch_chunks[i]
+                    sf = chunk["metadata"].get("source_file", "")
+                    indexed_per_file[sf] = indexed_per_file.get(sf, 0) + 1
+
+                    if "_function_path" in chunk:
+                        fkey = (str(chunk["_function_path"]), chunk["_function_name"])
+                        indexed_per_function[fkey] = indexed_per_function.get(fkey, 0) + 1
+
+                # Mark files whose all chunks have been successfully added
+                for sf in list(indexed_per_file):
+                    if sf in marked_files:
+                        continue
+                    if indexed_per_file[sf] >= chunks_per_file.get(sf, 0):
+                        file_path = chunk["_file_path"] if "_file_path" in chunk else None
+                        # Find the actual Path object from any chunk of this file
+                        for c in chunks:
+                            if c["metadata"].get("source_file") == sf and "_file_path" in c:
+                                file_path = c["_file_path"]
+                                break
+                        if file_path:
+                            self.file_tracker.mark_indexed(file_path, collection_name)
+                            marked_files.add(sf)
+                            logger.debug(f"Checkpoint: marked {sf} as indexed")
+
+                # Mark functions whose all chunks have been successfully added
+                for fkey in list(indexed_per_function):
+                    if fkey in marked_functions:
+                        continue
+                    if indexed_per_function[fkey] >= chunks_per_function.get(fkey, 0):
+                        info = function_info[fkey]
+                        self.file_tracker.mark_function_indexed(
+                            info["path"], info["name"], info["hash"], collection_name,
+                        )
+                        marked_functions.add(fkey)
 
             except Exception as e:
                 logger.error(f"Error batch indexing to {collection.name}: {e}")
                 raise
-        
-        # Mark all files as indexed after successful indexing
-        for file_path in files_to_mark:
-            self.file_tracker.mark_indexed(file_path, collection_name)
-
-        # Mark function hashes for function-level tracking (tree-sitter path)
-        seen_functions: set[tuple] = set()
-        for chunk in chunks:
-            if "_function_path" in chunk:
-                key = (chunk["_function_path"], chunk["_function_name"])
-                if key not in seen_functions:
-                    seen_functions.add(key)
-                    self.file_tracker.mark_function_indexed(
-                        chunk["_function_path"],
-                        chunk["_function_name"],
-                        chunk["_function_hash"],
-                        collection_name,
-                    )
 
         return total_indexed
 
@@ -734,7 +823,6 @@ class VectorIndexer:
                     self.metadata_collection,
                     metadata_chunks,
                     self.COLLECTION_METADATA,
-                    "metadata_all",
                 )
 
         # Collect code files with parallel parsing
@@ -752,7 +840,6 @@ class VectorIndexer:
                 self.code_collection,
                 code_chunks,
                 self.COLLECTION_CODE,
-                "code_all",
             )
 
         # Collect help files with parallel parsing
@@ -770,7 +857,6 @@ class VectorIndexer:
                 self.help_collection,
                 help_chunks,
                 self.COLLECTION_HELP,
-                "help_final",
             )
 
         logger.info(

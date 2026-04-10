@@ -273,11 +273,15 @@ def get_module_functions(module_path: str) -> list[dict]:
 def get_function_context(function_name: str) -> dict:
     """Get call graph context for a function: what it calls and who calls it.
 
+    Accepts ONLY the function name — no file path, no module path.
+    The function is looked up globally across all indexed modules.
+
     Args:
-        function_name: Name of the function (e.g. "ПровестиДокумент")
+        function_name: Exact name of the function/procedure (e.g. "ПровестиДокумент").
+                       Do NOT pass a file path here — only the function name.
 
     Returns:
-        Dict with function info, list of called functions, and list of callers
+        Dict with function info (including its module_path), list of called functions, and list of callers
     """
     if not sqlite_store:
         return {"error": "SQLite store not initialized"}
@@ -512,7 +516,7 @@ def search_code_filtered(
 
 
 @mcp.tool()
-def code_grep(pattern: str, case_sensitive: bool = False, limit: int = 20) -> list[dict]:
+def code_grep(pattern: str, path: str = "", case_sensitive: bool = False, limit: int = 20) -> list[dict]:
     """Search for text pattern in BSL code with AST context.
 
     Unlike regular grep, returns matches with structural context:
@@ -523,6 +527,8 @@ def code_grep(pattern: str, case_sensitive: bool = False, limit: int = 20) -> li
 
     Args:
         pattern: Text pattern to search (substring match, not regex)
+        path: Filter results by file path substring (e.g. "Documents/РеализацияТоваров"
+              or "CommonModules"). Empty string means no filter.
         case_sensitive: Whether search is case-sensitive (default: False)
         limit: Maximum results to return (default: 20)
 
@@ -536,7 +542,7 @@ def code_grep(pattern: str, case_sensitive: bool = False, limit: int = 20) -> li
     """
     # Fast path: FTS5 index (instant)
     if sqlite_store and sqlite_store.has_code_fts():
-        results = sqlite_store.code_grep(pattern, case_sensitive=case_sensitive, limit=limit)
+        results = sqlite_store.code_grep(pattern, path=path, case_sensitive=case_sensitive, limit=limit)
         if results is not None:
             return results
 
@@ -548,6 +554,7 @@ def code_grep(pattern: str, case_sensitive: bool = False, limit: int = 20) -> li
     return _code_grep.search(
         pattern=pattern,
         source_path=source,
+        path=path,
         case_sensitive=case_sensitive,
         limit=limit,
     )

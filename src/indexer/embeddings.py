@@ -102,6 +102,7 @@ class OpenRouterEmbeddings:
         self,
         api_key: str,
         model: str = "qwen/qwen3-embedding-4b",
+        chunk_size: int = 50,
     ):
         from langchain_openai import OpenAIEmbeddings as LCOpenAIEmbeddings
 
@@ -110,8 +111,9 @@ class OpenRouterEmbeddings:
             api_key=api_key,
             model=model,
             base_url=self.OPENROUTER_BASE_URL,
+            chunk_size=chunk_size,
         )
-        logger.info(f"Initialized OpenRouter embeddings with model: {model}")
+        logger.info(f"Initialized OpenRouter embeddings with model: {model}, chunk_size={chunk_size}")
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         """Embed multiple documents."""
@@ -579,6 +581,7 @@ def create_embedding_provider(
                 primary = OpenRouterEmbeddings(
                     api_key=api_key,
                     model=resolved_model or "qwen/qwen3-embedding-4b",
+                    chunk_size=batch_size,
                 )
         case "ollama":
             primary = OllamaEmbeddings(
@@ -627,6 +630,11 @@ class ChromaDBEmbeddingFunction(EmbeddingFunction):
     def __call__(self, input: Documents) -> Embeddings:
         """Generate embeddings for ChromaDB."""
         return self._provider.embed_documents(list(input))
+
+    def name(self) -> str:
+        """Return embedding function name for ChromaDB collection compatibility checks."""
+        model = getattr(self._provider, "model", "unknown")
+        return f"{type(self._provider).__name__}/{model}"
 
     def embed_raw(self, input: Documents) -> list:
         """Generate embeddings bypassing ChromaDB validation (may contain None for failed batches)."""
