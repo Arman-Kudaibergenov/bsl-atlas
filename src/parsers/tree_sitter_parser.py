@@ -83,35 +83,91 @@ def _extract_params(params_node, src: bytes) -> list[str]:
     return result
 
 
-def _extract_calls(func_node, src: bytes, func_name_lower: str) -> list[str]:
-    """Recursively collect all function/method call names within a node."""
-    calls: list[str] = []
-    seen: set[str] = set()
+def _method_name(method_call_node, src: bytes) -> str | None:
+    """The method identifier inside a `method_call` node (its first identifier)."""
+    for c in method_call_node.named_children:
+        if c.type == "identifier":
+            return _text(c, src)
+    return None
 
-    def _walk(node):
-        if node.type in _CALL_TYPES:
-            name_node = node.child_by_field_name("name")
-            if name_node is None:
-                # Some grammars put name as first identifier child
-                for c in node.children:
-                    if c.type == "identifier":
-                        name_node = c
-                        break
-            if name_node:
-                name = _text(name_node, src)
-                nl = name.lower()
-                if nl not in _KEYWORDS_LOWER and nl != func_name_lower and name not in seen:
-                    seen.add(name)
-                    calls.append(name)
-            # Still recurse into arguments
-        for child in node.children:
-            # Don't recurse into nested function definitions
-            if child.type not in _FUNC_TYPES:
-                _walk(child)
 
-    # Walk only the body, not the signature
+def _access_qualifier(access_node, src: bytes) -> str | None:
+    """Rightmost name segment of an `access` (receiver) node.
+
+    `ОбщегоНазначения`            -> 'ОбщегоНазначения'  (single identifier)
+    `Справочники.Контрагенты`     -> 'Контрагенты'        (last `property` segment)
+    Matches the regex parser's "immediate qualifier before the method" semantics,
+    so commonmodule resolution (qualifier -> object_name) lines up across parsers.
+    """
+    if access_node is None:
+        return None
+    kids = access_node.named_children
+    last = kids[-1] if kids else access_node
+    if last.type in ("property", "identifier"):
+        return _text(last, src)
+    if last.type == "access":
+        return _access_qualifier(last, src)
+    return _text(last, src) if last is not access_node else None
+
+
+def _extract_calls(func_node, src: bytes, func_name_lower: str) -> list[tuple[str | None, str]]:
+    """Collect all call sites as (qualifier, name) within a function body.
+
+    Grammar shape (alkoleft/tree-sitter-bsl):
+      qualified call  -> call_expression( access<qualifier>, method_call<name,args> )
+      unqualified call-> bare method_call<name,args>
+    The qualifier lives as a SIBLING `access` of `method_call`, not inside it.
+    """
+    calls: list[tuple[str | None, str]] = []
+    seen: set[tuple[str | None, str]] = set()
+
+    def record(qualifier: str | None, name: str) -> None:
+        nl = name.lower()
+        if nl in _KEYWORDS_LOWER or nl == func_name_lower:
+            return
+        key = (qualifier, name)
+        if key not in seen:
+            seen.add(key)
+            calls.append(key)
+
+    def _walk_args(method_call_node) -> None:
+        for c in method_call_node.named_children:
+            if c.type == "arguments":
+                for arg in c.named_children:
+                    _walk(arg)
+
+    def _walk(node) -> None:
+        t = node.type
+        if t in _FUNC_TYPES:
+            return  # never descend into nested definitions
+        if t == "call_expression":
+            acc = mc = None
+            for c in node.named_children:
+                if c.type == "access":
+                    acc = c
+                elif c.type == "method_call":
+                    mc = c
+            if mc is not None:
+                nm = _method_name(mc, src)
+                if nm:
+                    record(_access_qualifier(acc, src), nm)
+                _walk_args(mc)
+            # a receiver expression can itself contain calls, e.g. Получить().Метод()
+            if acc is not None:
+                _walk(acc)
+            return
+        if t == "method_call":
+            nm = _method_name(node, src)
+            if nm:
+                record(None, nm)
+            _walk_args(node)
+            return
+        for child in node.named_children:
+            _walk(child)
+
+    # Walk only the body, not the signature (identifier/parameters/keywords)
     for child in func_node.children:
-        if child.type not in {"identifier", "parameters"} and "keyword" not in child.type:
+        if child.type not in {"identifier", "parameters"} and "keyword" not in child.type.lower():
             _walk(child)
 
     return calls

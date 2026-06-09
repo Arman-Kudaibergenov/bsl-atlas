@@ -17,13 +17,17 @@ COPY src/ ./src/
 # Install dependencies
 RUN pip install --no-cache-dir .
 
-# Compile tree-sitter-bsl grammar into a shared library via gcc
+# Compile tree-sitter-bsl grammar into a shared library via gcc.
+# Upstream restructured: the generated parser now lives under grammars/bsl/src
+# (older layout had it at src/). Locate parser.c dynamically to survive both.
 RUN git clone --depth 1 https://github.com/alkoleft/tree-sitter-bsl /tmp/tree-sitter-bsl \
     && mkdir -p /app/lib \
-    && cd /tmp/tree-sitter-bsl \
-    && SRCS="src/parser.c" \
-    && if [ -f src/scanner.c ]; then SRCS="$SRCS src/scanner.c"; fi \
-    && gcc -shared -fPIC -Os -Isrc -o /app/lib/bsl.so $SRCS \
+    && PARSER=$(find /tmp/tree-sitter-bsl -path '*/bsl/src/parser.c' -o -path '/tmp/tree-sitter-bsl/src/parser.c' | head -1) \
+    && SRCDIR=$(dirname "$PARSER") \
+    && echo "Using grammar src: $SRCDIR" \
+    && SRCS="$SRCDIR/parser.c" \
+    && if [ -f "$SRCDIR/scanner.c" ]; then SRCS="$SRCS $SRCDIR/scanner.c"; fi \
+    && gcc -shared -fPIC -Os -I"$SRCDIR" -o /app/lib/bsl.so $SRCS \
     && echo "tree-sitter-bsl compiled OK" \
     && rm -rf /tmp/tree-sitter-bsl
 

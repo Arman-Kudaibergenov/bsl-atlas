@@ -27,19 +27,25 @@ class VectorIndexer:
     COLLECTION_CODE = "code"
     COLLECTION_HELP = "help"
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, graph_store: Any = None):
         """Initialize vector indexer.
 
         Args:
             config: Application configuration
+            graph_store: Optional SQLiteStore. When provided, code functions are
+                embedded as their graph skeleton CARDS (signature + owner synonym
+                + resolved callees + touched objects, ~164 chars) instead of raw
+                bodies — the design's discovery layer (hit@5 0.78 vs 0.00 for
+                FTS-over-bodies on the slice eval).
         """
         self.config = config
+        self.graph_store = graph_store
 
         # Initialize embedding provider for indexing
         indexing_provider = config.indexing_provider
         base_url = config.ollama_base_url if indexing_provider == "ollama" else config.openai_api_base
         model = config.ollama_model if indexing_provider == "ollama" else config.embedding_model
-        
+
         self.embedding_provider = create_embedding_provider(
             provider=indexing_provider,
             api_key=config.get_api_key(indexing_provider),
@@ -222,7 +228,7 @@ class VectorIndexer:
             logger.debug(f"Skipping file: {file_path} - {skip_reason}")
             self.file_tracker.mark_skipped(file_path, self.COLLECTION_METADATA, skip_reason)
             return 0
-        
+
         status = self.file_tracker.get_file_status(file_path, self.COLLECTION_METADATA)
         if status == "unchanged":
             logger.debug(f"Skipping unchanged file: {file_path}")
@@ -271,7 +277,7 @@ class VectorIndexer:
 
             logger.info(f"Indexed metadata file {file_path}: {len(all_chunks)} chunks")
             return len(all_chunks)
-            
+
         except Exception as e:
             logger.error(f"Failed to index metadata file {file_path}: {e}")
             self.file_tracker.mark_failed(file_path, self.COLLECTION_METADATA, str(e))
@@ -292,7 +298,7 @@ class VectorIndexer:
             logger.debug(f"Skipping file: {file_path} - {skip_reason}")
             self.file_tracker.mark_skipped(file_path, self.COLLECTION_CODE, skip_reason)
             return 0
-        
+
         status = self.file_tracker.get_file_status(file_path, self.COLLECTION_CODE)
         if status == "unchanged":
             logger.debug(f"Skipping unchanged file: {file_path}")
@@ -336,7 +342,7 @@ class VectorIndexer:
 
             logger.info(f"Indexed code file {file_path}: {len(all_chunks)} chunks")
             return len(all_chunks)
-            
+
         except Exception as e:
             logger.error(f"Failed to index code file {file_path}: {e}")
             self.file_tracker.mark_failed(file_path, self.COLLECTION_CODE, str(e))
@@ -357,7 +363,7 @@ class VectorIndexer:
             logger.debug(f"Skipping file: {file_path} - {skip_reason}")
             self.file_tracker.mark_skipped(file_path, self.COLLECTION_HELP, skip_reason)
             return 0
-        
+
         status = self.file_tracker.get_file_status(file_path, self.COLLECTION_HELP)
         if status == "unchanged":
             logger.debug(f"Skipping unchanged file: {file_path}")
@@ -401,15 +407,15 @@ class VectorIndexer:
 
             logger.info(f"Indexed help file {file_path}: {len(all_chunks)} chunks")
             return len(all_chunks)
-            
+
         except Exception as e:
             logger.error(f"Failed to index help file {file_path}: {e}")
             self.file_tracker.mark_failed(file_path, self.COLLECTION_HELP, str(e))
             raise
 
     def _collect_file_chunks(
-        self, 
-        file_path: Path, 
+        self,
+        file_path: Path,
         collection_name: str,
         parser_method: str,
     ) -> list[dict[str, Any]]:
@@ -426,9 +432,9 @@ class VectorIndexer:
         status = self.file_tracker.get_file_status(file_path, collection_name)
         if status == "unchanged":
             return []
-            
+
         all_chunks = []
-        
+
         if parser_method == "metadata":
             objects = self.metadata_parser.parse_file(file_path)
             if not objects:
@@ -452,7 +458,7 @@ class VectorIndexer:
                     },
                 )
                 all_chunks.extend(chunks)
-                
+
         elif parser_method == "code":
             # Function-level chunking when parse_file_functions is available (tree-sitter or regex)
             functions_indexed = False
@@ -461,6 +467,21 @@ class VectorIndexer:
                     functions = self.code_parser.parse_file_functions(file_path)
                     if functions:
                         functions_indexed = True
+
+                        # Skeleton-card lookup for this module (one bulk query).
+                        # We embed the graph card, not the body — see __init__.
+                        module_cards: dict[str, str] = {}
+                        if self.graph_store is not None and functions:
+                            try:
+                                module_cards = self.graph_store.cards_for_module(
+                                    functions[0].module_path
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    f"cards_for_module failed for {file_path}: {e}, "
+                                    f"falling back to body embedding"
+                                )
+
                         for fn in functions:
                             # Skip trivially small functions
                             body_lines = fn.body.count("\n") + 1
@@ -478,13 +499,17 @@ class VectorIndexer:
                                 logger.debug(f"Skipping unchanged function: {fn.name} in {file_path}")
                                 continue
 
-                            header = (
-                                f"{'Функция' if fn.type == 'Функция' else 'Процедура'} "
-                                f"{fn.name}({', '.join(fn.params)})"
-                            )
-                            if fn.is_export:
-                                header += " Экспорт"
-                            content = f"{header}\n\n{fn.body}"
+                            # Prefer the graph skeleton card; fall back to the
+                            # body header+source when the symbol isn't in the graph.
+                            content = module_cards.get(fn.name.lower())
+                            if not content:
+                                header = (
+                                    f"{'Функция' if fn.type == 'Функция' else 'Процедура'} "
+                                    f"{fn.name}({', '.join(fn.params)})"
+                                )
+                                if fn.is_export:
+                                    header += " Экспорт"
+                                content = f"{header}\n\n{fn.body}"
 
                             metadata = {
                                 "full_path": fn.module_path,
@@ -496,8 +521,9 @@ class VectorIndexer:
                                 "is_export": fn.is_export,
                             }
 
-                            # Smart chunking: function = one chunk; only split if body > 2000 chars
-                            if len(fn.body) <= 2000:
+                            # Smart chunking: one chunk per symbol; only split if
+                            # the embedded text (card or body) exceeds 2000 chars.
+                            if len(content) <= 2000:
                                 fn_chunks = [{"content": content, "metadata": {**metadata, "chunk_index": 0}}]
                             else:
                                 fn_chunks = self._chunk_document(content, metadata)
@@ -538,7 +564,7 @@ class VectorIndexer:
                         },
                     )
                     all_chunks.extend(chunks)
-                
+
         elif parser_method == "help":
             help_objects = self.help_parser.parse_file(file_path)
             if not help_objects:
@@ -561,15 +587,40 @@ class VectorIndexer:
                     },
                 )
                 all_chunks.extend(chunks)
-        
+
         # Add file path to each chunk for tracking
         for chunk in all_chunks:
             chunk["_file_path"] = file_path
-            
+
         return all_chunks
 
     # ChromaDB has a limit of ~5461 documents per add() call
     CHROMA_MAX_BATCH = 5000
+
+    @staticmethod
+    def _stable_id(source_file: str, name: str, chunk_index: int) -> str:
+        """Deterministic vector id = hash(source_file:name:chunk_index).
+
+        Replaces positional ids so a changed function overwrites its own vector
+        in place (via upsert) instead of leaking a duplicate, and so a removed
+        function's vector can be deleted by source_file. (design fix #1)
+        """
+        h = hashlib.sha256(
+            f"{source_file}::{name}::{chunk_index}".encode("utf-8", errors="replace")
+        ).hexdigest()[:32]
+        return f"fn_{h}"
+
+    def _chunk_id(self, chunk: dict[str, Any], id_prefix: str, fallback_idx: int) -> str:
+        """Stable id when the chunk carries source_file+name, else positional."""
+        md = chunk.get("metadata", {})
+        source_file = md.get("source_file") or (
+            str(chunk["_file_path"]) if "_file_path" in chunk else None
+        )
+        name = md.get("name")
+        chunk_index = md.get("chunk_index", 0)
+        if source_file and name is not None:
+            return self._stable_id(source_file, name, chunk_index)
+        return f"{id_prefix}_{fallback_idx}"
 
     def _batch_index_chunks(
         self,
@@ -591,24 +642,27 @@ class VectorIndexer:
         """
         if not chunks:
             return 0
-            
+
         # Extract unique files for tracking
         files_to_mark = set()
         for chunk in chunks:
             if "_file_path" in chunk:
                 files_to_mark.add(chunk["_file_path"])
-        
+
         total_indexed = 0
-        
+
         # Split into sub-batches to respect ChromaDB limit
         for batch_idx in range(0, len(chunks), self.CHROMA_MAX_BATCH):
             batch_chunks = chunks[batch_idx:batch_idx + self.CHROMA_MAX_BATCH]
-            
-            # Prepare data for ChromaDB
-            ids = [f"{id_prefix}_{batch_idx + i}" for i in range(len(batch_chunks))]
+
+            # Prepare data for ChromaDB — stable ids enable in-place overwrite
+            ids = [
+                self._chunk_id(chunk, id_prefix, batch_idx + i)
+                for i, chunk in enumerate(batch_chunks)
+            ]
             contents = [chunk["content"] for chunk in batch_chunks]
             metadatas = [{k: v for k, v in chunk["metadata"].items()} for chunk in batch_chunks]
-            
+
             try:
                 # Get embeddings bypassing ChromaDB validation wrapper (may contain None)
                 embeddings = self.embedding_function.embed_raw(contents)
@@ -625,7 +679,8 @@ class VectorIndexer:
                 if not valid:
                     continue
                 valid_idx = [i for i, _ in valid]
-                collection.add(
+                # upsert (not add): stable ids overwrite in place on re-index
+                collection.upsert(
                     ids=[ids[i] for i in valid_idx],
                     documents=[contents[i] for i in valid_idx],
                     metadatas=[metadatas[i] for i in valid_idx],
@@ -640,7 +695,7 @@ class VectorIndexer:
             except Exception as e:
                 logger.error(f"Error batch indexing to {collection.name}: {e}")
                 raise
-        
+
         # Mark all files as indexed after successful indexing
         for file_path in files_to_mark:
             self.file_tracker.mark_indexed(file_path, collection_name)
@@ -680,24 +735,24 @@ class VectorIndexer:
             List of all chunks from all files
         """
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        
+
         all_chunks = []
         errors = 0
-        
+
         def process_file(file_path: Path) -> list[dict[str, Any]]:
             try:
                 return self._collect_file_chunks(file_path, collection_name, parser_method)
             except Exception as e:
                 logger.error(f"Error processing {file_path}: {e}")
                 return []
-        
+
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {executor.submit(process_file, f): f for f in files}
-            
+
             for future in as_completed(futures):
                 chunks = future.result()
                 all_chunks.extend(chunks)
-        
+
         logger.info(f"Parallel collected {len(all_chunks)} chunks from {len(files)} files")
         return all_chunks
 
@@ -741,11 +796,11 @@ class VectorIndexer:
         logger.info("Collecting code files (parallel)...")
         code_files = list(directory.rglob("*.bsl"))
         logger.info(f"Found {len(code_files)} code files")
-        
+
         code_chunks = self._parallel_collect_chunks(
             code_files, self.COLLECTION_CODE, "code"
         )
-        
+
         # Index code in sub-batches
         if code_chunks:
             stats["code"] = self._batch_index_chunks(
@@ -759,11 +814,11 @@ class VectorIndexer:
         logger.info("Collecting help files (parallel)...")
         help_files = list(directory.rglob("*.html")) + list(directory.rglob("*.htm"))
         logger.info(f"Found {len(help_files)} help files")
-        
+
         help_chunks = self._parallel_collect_chunks(
             help_files, self.COLLECTION_HELP, "help"
         )
-        
+
         # Index help in sub-batches
         if help_chunks:
             stats["help"] = self._batch_index_chunks(
@@ -778,7 +833,49 @@ class VectorIndexer:
             f"{stats['code']} code, {stats['help']} help chunks"
         )
         return stats
-    
+
+    def reindex_files_vector(
+        self,
+        changed_files: list[Path],
+        deleted_files: list[Path] | None = None,
+    ) -> dict[str, int]:
+        """Incremental vector delta: delete stale vectors, re-embed changed files.
+
+        For every changed or deleted file, drop its existing code vectors by
+        `source_file` (handles removed/renamed functions too), then for changed
+        files re-collect and re-embed. Stable ids + upsert keep it idempotent.
+        """
+        deleted_files = deleted_files or []
+        affected = list(changed_files) + list(deleted_files)
+
+        deleted_vectors = 0
+        for f in affected:
+            try:
+                before = self.code_collection.count()
+                self.code_collection.delete(where={"source_file": str(f)})
+                deleted_vectors += max(0, before - self.code_collection.count())
+            except Exception as e:
+                logger.warning(f"Vector delete failed for {f}: {e}")
+            # Force re-collection / re-embed of this file's functions next pass
+            self.file_tracker.unmark_file(f, self.COLLECTION_CODE)
+            self.file_tracker.clear_file_functions(f, self.COLLECTION_CODE)
+
+        indexed = 0
+        if changed_files:
+            chunks = self._parallel_collect_chunks(
+                list(changed_files), self.COLLECTION_CODE, "code"
+            )
+            if chunks:
+                indexed = self._batch_index_chunks(
+                    self.code_collection, chunks, self.COLLECTION_CODE, "code_inc"
+                )
+
+        logger.info(
+            f"Vector incremental: -{deleted_vectors} stale, +{indexed} re-embedded "
+            f"({len(changed_files)} changed, {len(deleted_files)} deleted)"
+        )
+        return {"deleted_vectors": deleted_vectors, "indexed_chunks": indexed}
+
     def should_skip_file(self, file_path: Path) -> tuple[bool, str | None]:
         """Check if file should be skipped based on filter patterns.
         
@@ -796,15 +893,15 @@ class VectorIndexer:
             "**/__pycache__/**",
             "**/node_modules/**",
         ]
-        
+
         path_str = str(file_path)
         for pattern in skip_patterns:
             import fnmatch
             if fnmatch.fnmatch(path_str, pattern):
                 return True, f"Matched skip pattern: {pattern}"
-        
+
         return False, None
-    
+
     def retry_failed_files(self, max_retries: int = 3) -> dict[str, int]:
         """Retry indexing files that previously failed.
         
@@ -815,21 +912,21 @@ class VectorIndexer:
             Dict with retry statistics per collection
         """
         logger.info(f"Starting retry of failed files (max_retries={max_retries})")
-        
+
         stats = {"metadata": 0, "code": 0, "help": 0, "errors": 0}
-        
+
         # Retry metadata files
         failed_metadata = self.file_tracker.get_failed_files(
             self.COLLECTION_METADATA, max_retries
         )
         logger.info(f"Found {len(failed_metadata)} failed metadata files to retry")
-        
+
         for path_str, error_msg, retry_count in failed_metadata:
             file_path = Path(path_str)
             if not file_path.exists():
                 logger.warning(f"Skipping deleted file: {file_path}")
                 continue
-            
+
             try:
                 logger.info(f"Retrying metadata file (attempt {retry_count + 1}): {file_path}")
                 chunks = self.index_metadata_file(file_path)
@@ -840,19 +937,19 @@ class VectorIndexer:
                     file_path, self.COLLECTION_METADATA, str(e)
                 )
                 stats["errors"] += 1
-        
+
         # Retry code files
         failed_code = self.file_tracker.get_failed_files(
             self.COLLECTION_CODE, max_retries
         )
         logger.info(f"Found {len(failed_code)} failed code files to retry")
-        
+
         for path_str, error_msg, retry_count in failed_code:
             file_path = Path(path_str)
             if not file_path.exists():
                 logger.warning(f"Skipping deleted file: {file_path}")
                 continue
-            
+
             try:
                 logger.info(f"Retrying code file (attempt {retry_count + 1}): {file_path}")
                 chunks = self.index_code_file(file_path)
@@ -863,19 +960,19 @@ class VectorIndexer:
                     file_path, self.COLLECTION_CODE, str(e)
                 )
                 stats["errors"] += 1
-        
+
         # Retry help files
         failed_help = self.file_tracker.get_failed_files(
             self.COLLECTION_HELP, max_retries
         )
         logger.info(f"Found {len(failed_help)} failed help files to retry")
-        
+
         for path_str, error_msg, retry_count in failed_help:
             file_path = Path(path_str)
             if not file_path.exists():
                 logger.warning(f"Skipping deleted file: {file_path}")
                 continue
-            
+
             try:
                 logger.info(f"Retrying help file (attempt {retry_count + 1}): {file_path}")
                 chunks = self.index_help_file(file_path)
@@ -886,7 +983,7 @@ class VectorIndexer:
                     file_path, self.COLLECTION_HELP, str(e)
                 )
                 stats["errors"] += 1
-        
+
         logger.info(
             f"Retry complete: {stats['metadata']} metadata, {stats['code']} code, "
             f"{stats['help']} help chunks, {stats['errors']} errors"

@@ -10,7 +10,7 @@ from typing import Any
 
 import chardet
 
-from ..storage.models import BSLFunction
+from ..storage.models import BSLFunction, CallRef
 from . import tree_sitter_parser
 
 logger = logging.getLogger(__name__)
@@ -147,7 +147,11 @@ class CodeParser:
         functions.sort(key=lambda x: x["start_pos"])
         return functions
 
-    _CALL_PATTERN = re.compile(r"([А-Яа-яA-Za-z_]\w*)\s*\(")
+    # Capture an optional receiver qualifier (the last `X.` before the method)
+    # plus the called name: `ОбщегоНазначения.ЗначениеРеквизита(` -> ("ОбщегоНазначения", "ЗначениеРеквизита").
+    _CALL_PATTERN = re.compile(
+        r"(?:([А-Яа-яёЁA-Za-z_]\w*)\s*\.\s*)?([А-Яа-яёЁA-Za-z_]\w*)\s*\("
+    )
     _BSL_KEYWORDS = {
         "Если", "Пока", "Для", "Попытка", "Исключение", "Возврат", "Новый",
         "ИначеЕсли", "Иначе", "КонецЕсли", "КонецПока", "КонецДля",
@@ -155,6 +159,39 @@ class CodeParser:
         "Function", "Procedure", "EndProcedure", "EndFunction",
         "If", "While", "For", "Try", "Except", "Return", "New",
         "ElsIf", "Else", "EndIf", "EndWhile", "EndFor", "EndTry",
+        "Тогда", "Цикл", "Then", "Do",
+    }
+
+    # Platform global-context functions: called UNQUALIFIED, never user symbols.
+    # Dropping them removes call-graph noise (Joern-style). Curated core subset;
+    # anything not here stays as an honest unresolved edge (BSL LS supplies the
+    # full list in a later wave). Compared case-insensitively.
+    _PLATFORM_GLOBALS = {
+        s.lower() for s in (
+            "Сообщить", "ПоказатьПредупреждение", "Предупреждение", "Вопрос",
+            "СтрНайти", "СтрЗаменить", "СтрДлина", "СтрРазделить", "СтрСоединить",
+            "СтрШаблон", "СтрНачинаетсяС", "СтрЗаканчиваетсяНа", "СтрСравнить",
+            "СтрЧислоВхождений", "СтрПолучитьСтроку", "СтрЧислоСтрок",
+            "Лев", "Прав", "Сред", "СокрЛП", "СокрЛ", "СокрП", "ВРег", "НРег", "ТРег",
+            "Символ", "КодСимвола", "ПустаяСтрока",
+            "Цел", "Окр", "ACos", "ASin", "ATan", "Cos", "Sin", "Tan", "Exp", "Log",
+            "Log10", "Pow", "Sqrt", "Макс", "Мин",
+            "Число", "Строка", "Дата", "Булево", "ТипЗнч", "Тип",
+            "ЗначениеЗаполнено", "ЗначениеНеЗаполнено",
+            "НачалоДня", "КонецДня", "НачалоМесяца", "КонецМесяца", "НачалоГода",
+            "КонецГода", "НачалоНедели", "КонецНедели", "НачалоКвартала",
+            "КонецКвартала", "НачалоЧаса", "КонецЧаса", "НачалоМинуты", "КонецМинуты",
+            "ТекущаяДата", "ТекущаяДатаСеанса", "ДобавитьМесяц", "Год", "Месяц",
+            "День", "Час", "Минута", "Секунда", "ДеньНедели", "ДеньГода",
+            "Формат", "ЧислоПрописью", "НСтр",
+            "Новый", "XMLСтрока", "XMLЗначение", "XMLТип",
+            "ПолучитьОбщийМакет", "ПолучитьМакетОформления",
+            "ОткрытьФорму", "ОткрытьЗначение", "ПоказатьЗначение",
+            "ПолучитьФорму", "ЗакрытьСправкуИнформации",
+            "Найти", "ВвестиЧисло", "ВвестиСтроку", "ВвестиДату", "ВвестиЗначение",
+            "ОписаниеОшибки", "ИнформацияОбОшибке", "ВызватьИсключение",
+            "ТипЗначения", "Маx", "Min",
+        )
     }
 
     @staticmethod
@@ -201,6 +238,76 @@ class CodeParser:
                 result.append(param)
         return result
 
+    # Query-text object refs: `ИЗ Справочник.Контрагенты`, `JOIN Документ.X`, etc.
+    _QUERY_TYPES = {
+        "Справочник", "Документ", "РегистрСведений", "РегистрНакопления",
+        "РегистрБухгалтерии", "РегистрРасчета", "Перечисление",
+        "ПланВидовХарактеристик", "ПланСчетов", "ПланОбмена", "БизнесПроцесс",
+        "Задача", "Константа", "Последовательность",
+    }
+    _QUERY_REF_PATTERN = re.compile(
+        r"(?:ИЗ|FROM|ПРИСОЕДИНИТЬ|JOIN)\s+"
+        r"([А-Яа-яёЁA-Za-z]+)\.([А-Яа-яёЁA-Za-z0-9_]+)",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _extract_query_refs(cls, body: str) -> list[str]:
+        """Mine object full-names from embedded query text (code -> data edges)."""
+        refs: list[str] = []
+        seen: set[str] = set()
+        for m in cls._QUERY_REF_PATTERN.finditer(body):
+            obj_type, obj_name = m.group(1), m.group(2)
+            # Normalise the type keyword to its canonical 1C casing
+            canon = next((t for t in cls._QUERY_TYPES if t.lower() == obj_type.lower()), None)
+            if canon is None:
+                continue
+            full = f"{canon}.{obj_name}"
+            if full not in seen:
+                seen.add(full)
+                refs.append(full)
+        return refs
+
+    def _build_call_refs(self, raw_calls: list) -> list[CallRef]:
+        """Convert (qualifier, name) tuples from tree-sitter into CallRef, dropping
+        unqualified platform globals and deduping."""
+        refs: list[CallRef] = []
+        seen: set[tuple[str | None, str]] = set()
+        for item in raw_calls:
+            if isinstance(item, (tuple, list)):
+                qualifier, name = (item[0], item[1])
+            else:  # legacy plain string
+                qualifier, name = None, item
+            if qualifier is None and name.lower() in self._PLATFORM_GLOBALS:
+                continue
+            key = (qualifier, name)
+            if key in seen:
+                continue
+            seen.add(key)
+            refs.append(CallRef(name=name, qualifier=qualifier))
+        return refs
+
+    def _extract_calls_regex(self, body: str, func_name: str) -> list[CallRef]:
+        """Regex call extraction with qualifier capture (Fix A, fallback path)."""
+        calls: list[CallRef] = []
+        seen: set[tuple[str | None, str]] = set()
+        func_name_lower = func_name.lower()
+        for m in self._CALL_PATTERN.finditer(body):
+            qualifier = m.group(1)
+            name = m.group(2)
+            if name in self._BSL_KEYWORDS or qualifier in self._BSL_KEYWORDS:
+                continue
+            if name.lower() == func_name_lower and qualifier is None:
+                continue
+            if qualifier is None and name.lower() in self._PLATFORM_GLOBALS:
+                continue
+            key = (qualifier, name)
+            if key in seen:
+                continue
+            seen.add(key)
+            calls.append(CallRef(name=name, qualifier=qualifier))
+        return calls
+
     def parse_file_functions(self, file_path: str | Path) -> list[BSLFunction]:
         """Parse BSL file and return enriched BSLFunction list for SQLite layer.
 
@@ -242,10 +349,11 @@ class CodeParser:
                     is_export=f["is_export"],
                     line_start=f["line_start"],
                     line_end=f["line_end"],
-                    calls=f["calls"],
+                    calls=self._build_call_refs(f["calls"]),
                     body=f["body"],
                     module_path=module_path,
                     module_type=module_type,
+                    query_refs=self._extract_query_refs(f["body"]),
                 )
                 for f in ts_results
             ]
@@ -298,19 +406,8 @@ class CodeParser:
 
             params = self._parse_params(func["params_str"])
 
-            # Extract calls from body
-            calls = []
-            seen = set()
-            func_name_lower = func["name"].lower()
-            for call_match in self._CALL_PATTERN.finditer(body):
-                name = call_match.group(1)
-                if name in self._BSL_KEYWORDS:
-                    continue
-                if name.lower() == func_name_lower:
-                    continue
-                if name not in seen:
-                    seen.add(name)
-                    calls.append(name)
+            # Extract calls (qualifier + name) from body
+            calls = self._extract_calls_regex(body, func["name"])
 
             results.append(BSLFunction(
                 name=func["name"],
@@ -323,6 +420,7 @@ class CodeParser:
                 body=body,
                 module_path=module_path,
                 module_type=module_type,
+                query_refs=self._extract_query_refs(body),
             ))
 
         return results

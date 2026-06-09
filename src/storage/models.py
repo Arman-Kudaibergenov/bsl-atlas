@@ -11,6 +11,20 @@ from dataclasses import dataclass, field
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class CallRef:
+    """A single call site: the called name plus its optional qualifier.
+
+    For `ОбщегоНазначения.ЗначениеРеквизита(...)` -> qualifier="ОбщегоНазначения",
+    name="ЗначениеРеквизита". For an unqualified call `ПолучитьСтавку(...)` ->
+    qualifier=None. The qualifier is the receiver immediately left of the method
+    (the last `X.` before the `(`), which is what enables common-module resolution.
+    """
+
+    name: str
+    qualifier: str | None = None
+
+
 @dataclass
 class BSLFunction:
     """A parsed BSL function or procedure with enriched metadata."""
@@ -21,10 +35,11 @@ class BSLFunction:
     is_export: bool
     line_start: int         # 1-based line number
     line_end: int           # 1-based line number of КонецПроцедуры/КонецФункции
-    calls: list[str]        # function names called inside this function
+    calls: list[CallRef]    # call sites (qualifier + name) inside this function
     body: str               # full text of the function body
     module_path: str        # relative file path
     module_type: str        # "ObjectModule" | "ManagerModule" | "FormModule" | "CommonModule" | ...
+    query_refs: list[str] = field(default_factory=list)  # object full_names referenced in query text
 
 
 @dataclass
@@ -82,8 +97,9 @@ class FunctionContext:
     """Call graph context for a function."""
 
     function: FunctionInfo
-    calls: list[str]        # names of functions this one calls
-    called_by: list[str]    # names of functions that call this one
+    calls: list[str]            # names of functions this one calls
+    called_by: list[dict]       # callers, one per distinct symbol: {name, module, line}
+    ambiguous_definitions: int = 1  # how many symbols share this name (>1 = pick was arbitrary)
 
 
 @dataclass

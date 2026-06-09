@@ -12,6 +12,36 @@ import chromadb
 logger = logging.getLogger(__name__)
 
 
+def rrf_fuse(
+    ranked_lists: list[list[dict[str, Any]]],
+    key: str = "id",
+    k: int = 60,
+    top_k: int | None = None,
+) -> list[dict[str, Any]]:
+    """Reciprocal Rank Fusion of several ranked result lists.
+
+    Each item contributes 1/(k + rank) per list it appears in (rank 0-based). This
+    fuses heterogeneous rankers (FTS + vector) without needing comparable scores —
+    the standard hybrid-retrieval combiner. Items are matched across lists by `key`;
+    the first-seen item dict is returned annotated with an `rrf_score`, sorted desc.
+    """
+    scores: dict[Any, float] = {}
+    rep: dict[Any, dict[str, Any]] = {}
+    for results in ranked_lists:
+        for rank, item in enumerate(results):
+            ident = item.get(key)
+            if ident is None:
+                continue
+            scores[ident] = scores.get(ident, 0.0) + 1.0 / (k + rank)
+            rep.setdefault(ident, item)
+    fused = []
+    for ident, score in sorted(scores.items(), key=lambda kv: kv[1], reverse=True):
+        item = dict(rep[ident])
+        item["rrf_score"] = score
+        fused.append(item)
+    return fused[:top_k] if top_k else fused
+
+
 def _rerank_results(
     results: list[dict[str, Any]],
     query: str,
@@ -23,9 +53,9 @@ def _rerank_results(
     Falls back to original order if reranker is unavailable.
     """
     try:
-        import urllib.request
-        import urllib.error
         import json
+        import urllib.error
+        import urllib.request
 
         documents = [r.get("content", "") for r in results]
         payload = json.dumps({"query": query, "documents": documents, "top_k": top_k}).encode()
@@ -93,7 +123,7 @@ class HybridSearch:
             help_collection: ChromaDB collection for help
             search_embedding_provider: Optional separate embedding provider for search queries.
                 If provided, will be used instead of collection's embedding function.
-            reranker_url: Optional URL of cross-encoder reranker service (e.g. http://192.168.0.108:8400).
+            reranker_url: Optional URL of cross-encoder reranker service (e.g. http://localhost:8400).
                 If set, search results will be re-ranked before returning.
         """
         self.metadata_collection = metadata_collection

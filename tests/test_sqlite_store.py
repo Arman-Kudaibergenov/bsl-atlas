@@ -220,7 +220,7 @@ class TestGetFunctionContext:
         # ПолучитьСтавку is called by ПровестиДокумент
         ctx = store.get_function_context("ПолучитьСтавку")
         assert ctx is not None
-        assert "ПровестиДокумент" in ctx.called_by
+        assert "ПровестиДокумент" in {c["name"] for c in ctx.called_by}
 
     def test_not_found_returns_none(self, store):
         ctx = store.get_function_context("НесуществующаяФункция")
@@ -234,7 +234,7 @@ class TestGetFunctionContext:
     def test_private_has_caller(self, store):
         ctx = store.get_function_context("СформироватьДвижения")
         assert ctx is not None
-        assert "ПровестиДокумент" in ctx.called_by
+        assert "ПровестиДокумент" in {c["name"] for c in ctx.called_by}
 
 
 # ---------------------------------------------------------------------------

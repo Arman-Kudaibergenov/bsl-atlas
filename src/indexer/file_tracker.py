@@ -37,21 +37,21 @@ class FileTracker:
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='file_hashes'"
             )
             table_exists = cursor.fetchone() is not None
-            
+
             if table_exists:
                 # Check if new columns exist
                 cursor = conn.execute("PRAGMA table_info(file_hashes)")
                 columns = {row[1] for row in cursor.fetchall()}
-                
+
                 # Add new columns if missing (migration)
                 if "status" not in columns:
                     conn.execute("ALTER TABLE file_hashes ADD COLUMN status TEXT DEFAULT 'indexed'")
                     logger.info("Added 'status' column to file_hashes table")
-                
+
                 if "error_message" not in columns:
                     conn.execute("ALTER TABLE file_hashes ADD COLUMN error_message TEXT")
                     logger.info("Added 'error_message' column to file_hashes table")
-                
+
                 if "retry_count" not in columns:
                     conn.execute("ALTER TABLE file_hashes ADD COLUMN retry_count INTEGER DEFAULT 0")
                     logger.info("Added 'retry_count' column to file_hashes table")
@@ -68,7 +68,7 @@ class FileTracker:
                         retry_count INTEGER DEFAULT 0
                     )
                 """)
-            
+
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_collection
                 ON file_hashes(collection)
@@ -150,7 +150,7 @@ class FileTracker:
                 (path_str, current_hash, now, collection),
             )
             conn.commit()
-    
+
     def mark_failed(self, file_path: Path, collection: str, error_message: str):
         """Mark file as failed to index.
 
@@ -171,7 +171,7 @@ class FileTracker:
             )
             row = cursor.fetchone()
             retry_count = (row[0] + 1) if row else 1
-            
+
             conn.execute(
                 """
                 INSERT OR REPLACE INTO file_hashes 
@@ -182,7 +182,7 @@ class FileTracker:
             )
             conn.commit()
             logger.warning(f"Marked file as failed (retry {retry_count}): {path_str}")
-    
+
     def mark_skipped(self, file_path: Path, collection: str, reason: str):
         """Mark file as skipped (e.g., filtered out).
 
@@ -205,7 +205,7 @@ class FileTracker:
                 (path_str, current_hash, now, collection, reason),
             )
             conn.commit()
-    
+
     def get_failed_files(self, collection: str, max_retries: int = 3) -> list[tuple[str, str, int]]:
         """Get files that failed indexing and haven't exceeded max retries.
 
@@ -325,6 +325,32 @@ class FileTracker:
             )
             conn.commit()
 
+    def unmark_file(self, file_path: Path, collection: str):
+        """Forget a file's index record so it will be re-collected next pass."""
+        path_str = str(file_path.resolve())
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "DELETE FROM file_hashes WHERE path = ? AND collection = ?",
+                (path_str, collection),
+            )
+            conn.commit()
+
+    def clear_file_functions(self, file_path: Path, collection: str):
+        """Drop all function-level hashes for one file so its functions re-embed.
+
+        Keys are `<resolved_path>:<function_name>`; we delete by the path prefix.
+        Uses ESCAPE '|' (illegal in Windows paths) so backslashes stay literal and
+        only LIKE wildcards %/_ in the path are neutralised.
+        """
+        prefix = f"{file_path.resolve()}:"
+        escaped = prefix.replace("|", "||").replace("%", "|%").replace("_", "|_")
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "DELETE FROM function_hashes WHERE collection = ? AND key LIKE ? ESCAPE '|'",
+                (collection, escaped + "%"),
+            )
+            conn.commit()
+
     def clear_function_collection(self, collection: str):
         """Clear all function hash entries for a collection.
 
@@ -354,11 +380,11 @@ class FileTracker:
                 GROUP BY collection, status
                 """
             )
-            
+
             stats = {}
             for collection, status, count in cursor.fetchall():
                 if collection not in stats:
                     stats[collection] = {}
                 stats[collection][status] = count
-            
+
             return stats

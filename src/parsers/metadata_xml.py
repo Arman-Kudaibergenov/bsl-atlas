@@ -408,14 +408,14 @@ class MetadataXMLParser:
     # Directory-level parse
     # ------------------------------------------------------------------
 
-    def parse_directory(self, directory: str | Path) -> list[MetadataObject]:
-        directory = Path(directory)
-        results: list[MetadataObject] = []
-
-        # Build search roots: directory itself + standard subdirs (cf/, src/)
-        # For cfe/: each child directory is a separate extension
+    def _search_roots(self, directory: Path) -> list[Path]:
+        """Roots to scan: the dir itself + cf/src + each cfe extension subdir."""
         search_roots = [directory]
-        for subdir in directory.iterdir():
+        try:
+            children = list(directory.iterdir())
+        except OSError:
+            return search_roots
+        for subdir in children:
             if not subdir.is_dir():
                 continue
             if subdir.name in ("cf", "src"):
@@ -425,6 +425,13 @@ class MetadataXMLParser:
                 for ext_dir in subdir.iterdir():
                     if ext_dir.is_dir():
                         search_roots.append(ext_dir)
+        return search_roots
+
+    def parse_directory(self, directory: str | Path) -> list[MetadataObject]:
+        directory = Path(directory)
+        results: list[MetadataObject] = []
+
+        search_roots = self._search_roots(directory)
 
         for root in search_roots:
             for folder_name in self.FOLDER_TO_TYPE:
@@ -441,3 +448,160 @@ class MetadataXMLParser:
 
         logger.info(f"Parsed {len(results)} metadata objects from {directory} ({len(search_roots)} search roots)")
         return results
+
+    # ------------------------------------------------------------------
+    # Indirect edges: event subscriptions
+    # ------------------------------------------------------------------
+
+    # 1C internal (English) event names -> Russian, so "при записи" matches.
+    EVENT_NAME_MAP = {
+        "BeforeWrite": "ПередЗаписью",
+        "OnWrite": "ПриЗаписи",
+        "BeforeDelete": "ПередУдалением",
+        "OnCopy": "ПриКопировании",
+        "BeforePostDocument": "ПередПроведением",
+        "OnPost": "ПриПроведении",
+        "BeforeUndoPosting": "ПередОтменойПроведения",
+        "OnUndoPosting": "ПриОтменеПроведения",
+        "Posting": "Проведение",
+        "UndoPosting": "ОтменаПроведения",
+        "FillCheckProcessing": "ОбработкаПроверкиЗаполнения",
+        "Filling": "Заполнение",
+        "BeforeAddRow": "ПередНачаломДобавления",
+    }
+
+    @staticmethod
+    def _split_handler(handler: str) -> tuple[str, str]:
+        """`ОбщийМодуль.МодульА.Метод` or `МодульА.Метод` -> (module, method)."""
+        parts = [p for p in handler.replace(" ", "").split(".") if p]
+        if len(parts) >= 2:
+            return parts[-2], parts[-1]
+        if len(parts) == 1:
+            return "", parts[0]
+        return "", ""
+
+    def _parse_source_types(self, props_el: ET.Element) -> str:
+        """Comma-joined translated source types of a subscription."""
+        src_el = self._find_child(props_el, "Source")
+        if src_el is None:
+            return ""
+        parts: list[str] = []
+        for child in src_el:
+            if self._strip_ns(child.tag) == "Type" and child.text:
+                parts.append(self._translate_type_text(child.text.strip()))
+        return ", ".join(parts)
+
+    def parse_event_subscriptions(self, directory: str | Path) -> list[dict]:
+        """Parse EventSubscriptions/*.xml -> subscription dicts.
+
+        Each: {name, source, event, handler_module, handler_method}. The source
+        is the translated type list (e.g. "ДокументСсылка.РеализацияТоваров"); the
+        event is normalised to the Russian name for matching.
+        """
+        directory = Path(directory)
+        results: list[dict] = []
+        for root in self._search_roots(directory):
+            folder = root / "EventSubscriptions"
+            if not folder.exists():
+                continue
+            for xml_file in folder.glob("*.xml"):
+                try:
+                    obj = self._parse_subscription_file(xml_file)
+                    if obj is not None:
+                        results.append(obj)
+                except Exception as e:
+                    logger.error(f"Error parsing subscription {xml_file}: {e}")
+        logger.info(f"Parsed {len(results)} event subscriptions from {directory}")
+        return results
+
+    def _parse_subscription_file(self, file_path: Path) -> dict | None:
+        try:
+            root = ET.parse(file_path).getroot()
+        except Exception as e:
+            logger.warning(f"Failed to parse subscription XML {file_path}: {e}")
+            return None
+
+        obj_el = None
+        if self._strip_ns(root.tag) == "MetaDataObject":
+            for child in root:
+                if self._strip_ns(child.tag) == "EventSubscription":
+                    obj_el = child
+                    break
+        elif self._strip_ns(root.tag) == "EventSubscription":
+            obj_el = root
+        if obj_el is None:
+            return None
+
+        props = self._get_properties(obj_el) or obj_el
+        name = self._get_child_text(props, "Name") or file_path.stem
+        source = self._parse_source_types(props)
+        event_raw = self._get_child_text(props, "Event")
+        event = self.EVENT_NAME_MAP.get(event_raw, event_raw)
+        handler = self._get_child_text(props, "Handler")
+        module, method = self._split_handler(handler)
+        return {
+            "name": name,
+            "source": source,
+            "event": event,
+            "handler_module": module,
+            "handler_method": method,
+        }
+
+    # ------------------------------------------------------------------
+    # Graph roots: scheduled jobs / web / http services
+    # ------------------------------------------------------------------
+
+    ENTRY_POINT_FOLDERS = {
+        "ScheduledJobs": "scheduled_job",
+        "WebServices": "web_service",
+        "HTTPServices": "http_service",
+    }
+
+    def parse_entry_points(self, directory: str | Path) -> list[dict]:
+        """Parse scheduled jobs / web / http services -> entry-point dicts.
+
+        Each: {kind, name, handler_module, handler_method}. Scheduled jobs carry
+        a MethodName; services are recorded as roots (handler may be empty).
+        """
+        directory = Path(directory)
+        results: list[dict] = []
+        for root in self._search_roots(directory):
+            for folder_name, kind in self.ENTRY_POINT_FOLDERS.items():
+                folder = root / folder_name
+                if not folder.exists():
+                    continue
+                for xml_file in folder.glob("*.xml"):
+                    try:
+                        obj = self._parse_entry_point_file(xml_file, kind)
+                        if obj is not None:
+                            results.append(obj)
+                    except Exception as e:
+                        logger.error(f"Error parsing entry point {xml_file}: {e}")
+        logger.info(f"Parsed {len(results)} entry points from {directory}")
+        return results
+
+    def _parse_entry_point_file(self, file_path: Path, kind: str) -> dict | None:
+        try:
+            root = ET.parse(file_path).getroot()
+        except Exception as e:
+            logger.warning(f"Failed to parse entry-point XML {file_path}: {e}")
+            return None
+
+        obj_el = None
+        if self._strip_ns(root.tag) == "MetaDataObject":
+            obj_el = next(iter(root), None)
+        else:
+            obj_el = root
+        if obj_el is None:
+            return None
+
+        props = self._get_properties(obj_el) or obj_el
+        name = self._get_child_text(props, "Name") or file_path.stem
+        method_name = self._get_child_text(props, "MethodName")
+        module, method = self._split_handler(method_name) if method_name else ("", "")
+        return {
+            "kind": kind,
+            "name": name,
+            "handler_module": module,
+            "handler_method": method,
+        }

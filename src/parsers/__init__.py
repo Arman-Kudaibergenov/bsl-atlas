@@ -4,5 +4,14 @@ from .metadata import MetadataParser
 from .code import CodeParser
 from .help import HelpParser
 from .metadata_xml import MetadataXMLParser
+from .form_xml import FormXMLParser
+from .skd_xml import SKDXMLParser
 
-__all__ = ["MetadataParser", "CodeParser", "HelpParser", "MetadataXMLParser"]
+__all__ = [
+    "MetadataParser",
+    "CodeParser",
+    "HelpParser",
+    "MetadataXMLParser",
+    "FormXMLParser",
+    "SKDXMLParser",
+]

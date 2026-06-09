@@ -6,8 +6,6 @@ Dual-layer architecture:
 - Semantic layer (ChromaDB): codesearch, helpsearch, search_code_filtered — vector search
 """
 
-import asyncio
-import json
 import logging
 import os
 import threading
@@ -54,16 +52,67 @@ def _rebuild_sqlite():
     bsl_files = list(source.rglob("*.bsl"))
     logger.info(f"Found {len(bsl_files)} BSL files")
 
-    # Collect metadata objects from XML dump
+    # Collect metadata objects + indirect-edge sources from XML dump
     xml_parser = MetadataXMLParser()
     metadata_objects = xml_parser.parse_directory(source)
-    logger.info(f"Found {len(metadata_objects)} XML metadata objects")
+    subscriptions = xml_parser.parse_event_subscriptions(source)
+    entry_points = xml_parser.parse_entry_points(source)
+    logger.info(
+        f"Found {len(metadata_objects)} metadata objects, "
+        f"{len(subscriptions)} subscriptions, {len(entry_points)} entry points"
+    )
 
-    stats = sqlite_store.rebuild(bsl_files, metadata_objects)
+    stats = sqlite_store.rebuild(bsl_files, metadata_objects, subscriptions, entry_points)
     logger.info(
         f"SQLite rebuild complete: {stats.files} files, {stats.symbols} symbols, "
         f"{stats.objects} objects, {stats.attributes} attributes"
     )
+
+
+def _reindex_changed() -> dict:
+    """Incremental SQLite refresh: detect changed/deleted .bsl, update only those.
+
+    This is the daily-loop fix — a doraborotka reaches the index in seconds
+    instead of a full rebuild. Vector layer (if active) gets a best-effort delta.
+    """
+    if not sqlite_store:
+        return {"error": "SQLite store not initialized"}
+
+    source = config.source_path
+    if not source.exists():
+        logger.warning(f"SOURCE_PATH does not exist: {source}, skipping incremental")
+        return {"error": f"SOURCE_PATH does not exist: {source}"}
+
+    changed, deleted = sqlite_store.detect_changes(source)
+    logger.info(f"Incremental: {len(changed)} changed, {len(deleted)} deleted")
+
+    if changed or deleted:
+        sqlite_store.update(changed, deleted_keys=deleted)
+
+    result: dict = {
+        "changed_files": len(changed),
+        "deleted_files": len(deleted),
+    }
+    s = sqlite_store.stats()
+    result["sqlite"] = {
+        "files": s.files,
+        "symbols": s.symbols,
+        "objects": s.objects,
+        "attributes": s.attributes,
+    }
+    result["edges"] = sqlite_store.count_edges()
+
+    # Best-effort vector delta (only in full mode with an active indexer)
+    if indexer and (changed or deleted):
+        try:
+            _swap_to_reindex_provider()
+            vstats = indexer.reindex_files_vector(changed, deleted)
+            result["chromadb"] = vstats
+        except Exception as exc:
+            logger.error(f"Vector incremental failed: {exc}", exc_info=True)
+            result["chromadb_error"] = str(exc)
+
+    return result
 
 
 def _swap_to_reindex_provider():
@@ -112,8 +161,22 @@ def init_services():
     sqlite_store = SQLiteStore(db_path=config.sqlite_db_path)
 
     if config.sqlite_auto_rebuild:
-        logger.info("SQLITE_AUTO_REBUILD=true, building structural index...")
-        _rebuild_sqlite()
+        if sqlite_store.has_data():
+            # Index already exists → only pick up what changed since last run.
+            # Runs in the background so startup isn't blocked on the scan.
+            logger.info("SQLITE_AUTO_REBUILD=true, index present → incremental refresh in background")
+
+            def _incremental_background():
+                try:
+                    res = _reindex_changed()
+                    logger.info(f"Startup incremental refresh complete: {res}")
+                except Exception as e:
+                    logger.error(f"Startup incremental refresh failed: {e}", exc_info=True)
+
+            threading.Thread(target=_incremental_background, daemon=True).start()
+        else:
+            logger.info("SQLITE_AUTO_REBUILD=true, empty index → full structural build...")
+            _rebuild_sqlite()
     else:
         existing = sqlite_store.stats()
         logger.info(
@@ -122,7 +185,9 @@ def init_services():
 
     # --- ChromaDB vector layer (full mode only) ---
     if config.indexing_mode == "full":
-        indexer = VectorIndexer(config)
+        # Pass the structural graph so code functions embed as skeleton cards
+        # (discovery layer), not raw bodies.
+        indexer = VectorIndexer(config, graph_store=sqlite_store)
 
         # Create search embedding provider (if different from indexing)
         search_embedding_provider = None
@@ -269,12 +334,17 @@ def get_module_functions(module_path: str) -> list[dict]:
     ]
 
 
-@mcp.tool()
-def get_function_context(function_name: str) -> dict:
+# Folded into read_function(include_body=False) — unregistered to remove the confusing
+# third "function" tool (search_function = locate, read_function = read+graph).
+def get_function_context(function_name: str, object: str | None = None) -> dict:
     """Get call graph context for a function: what it calls and who calls it.
 
     Args:
         function_name: Name of the function (e.g. "ПровестиДокумент")
+        object: optional owning object/module to disambiguate a name reused across
+                modules (e.g. "ПоступлениеТоваров"). 1C reuses handler names
+                (ОбработкаПроведения/ПередЗаписью) in hundreds of objects — pass this
+                to target the right def instead of the arbitrary highest-export pick.
 
     Returns:
         Dict with function info, list of called functions, and list of callers
@@ -282,7 +352,7 @@ def get_function_context(function_name: str) -> dict:
     if not sqlite_store:
         return {"error": "SQLite store not initialized"}
 
-    ctx = sqlite_store.get_function_context(function_name)
+    ctx = sqlite_store.get_function_context(function_name, object=object)
     if not ctx:
         return {"error": f"Function '{function_name}' not found in index"}
 
@@ -298,6 +368,8 @@ def get_function_context(function_name: str) -> dict:
         },
         "calls": ctx.calls,
         "called_by": ctx.called_by,
+        "called_by_count": len(ctx.called_by),
+        "ambiguous_definitions": ctx.ambiguous_definitions,
     }
 
 
@@ -393,6 +465,176 @@ def metadatasearch(query: str, limit: int = 10) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Graph tools — Wave 1 (repomap / context / triggers / verify / card)
+# All SQLite, instant, no embeddings. Named as the questions an AI actually asks.
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def repomap(scope: str | None = None, token_budget: int = 4000) -> list[dict]:
+    """Lay-of-the-land map: signatures only of the most central symbols (no bodies).
+
+    PageRank over the call graph surfaces the hubs (ОбщегоНазначения-style modules,
+    core procedures). Cheap orientation before diving in. Optionally scope to an
+    object name or module-path substring.
+
+    Args:
+        scope: object name (e.g. "ОбщегоНазначения") or module-path substring; None = whole base
+        token_budget: approximate output budget in tokens (default 4000)
+
+    Returns:
+        Signatures with module, owner, and centrality — ranked, bounded.
+    """
+    if not sqlite_store:
+        return [{"error": "SQLite store not initialized"}]
+    return sqlite_store.repomap(scope=scope, token_budget=token_budget)
+
+
+@mcp.tool()
+def read_function(
+    symbol_name: str,
+    budget_chars: int = 6000,
+    object: str | None = None,
+    include_body: bool = True,
+) -> dict:
+    """Read a function/procedure with its full neighbourhood in ONE call — the
+    "give me the whole procedure and everything around it" tool.
+
+    Returns signature + full body + resolved callees + callers (file:line) + touched
+    objects/registers + query refs, budget-bounded. Use this once you know the function
+    name (e.g. after search_function or code_grep) instead of grep+read round-trips.
+    Set include_body=False for a cheap call-graph-only view (folds the old
+    get_function_context).
+
+    Args:
+        symbol_name: function/procedure name (e.g. "ПровестиДокумент")
+        budget_chars: max body characters to include (default 6000)
+        object: optional owning object/module to disambiguate a name reused across
+                modules (e.g. "ПоступлениеТоваров"). Without it the highest-export
+                def is picked; the result always reports ambiguous_definitions and
+                object_matched so the caller knows whether the pick was targeted.
+        include_body: include the procedure body text (default True). False = graph only.
+    """
+    if not sqlite_store:
+        return {"error": "SQLite store not initialized"}
+    bundle = sqlite_store.context_for(symbol_name, budget_chars=budget_chars, object=object)
+    if bundle is None:
+        return {"error": f"Symbol '{symbol_name}' not found in index"}
+    if not include_body and isinstance(bundle, dict):
+        bundle = {k: v for k, v in bundle.items() if k != "body"}
+    return bundle
+
+
+@mcp.tool()
+def triggers_on_write(object_full_name: str, event: str | None = None) -> dict:
+    """What fires when an object is written/posted — object handlers + subscriptions + register movements.
+
+    The high-value 1C query the call graph alone can't answer: combines object-module
+    lifecycle handlers (ПередЗаписью/ОбработкаПроведения/…), matching event
+    subscriptions, and register movements.
+
+    Args:
+        object_full_name: e.g. "Документ.РеализацияТоваров"
+        event: optional filter, e.g. "ПередЗаписью" / "Проведение"
+    """
+    if not sqlite_store:
+        return {"error": "SQLite store not initialized"}
+    return sqlite_store.triggers_on_write(object_full_name, event=event)
+
+
+@mcp.tool()
+def verify_call(caller: str, callee: str) -> dict:
+    """Oracle: does `caller` actually call `callee`? Check before asserting it.
+
+    Returns holds + edge_type + resolved, or holds=false with a reason. Use to
+    fact-check a claim against the graph instead of guessing.
+    """
+    if not sqlite_store:
+        return {"error": "SQLite store not initialized"}
+    return sqlite_store.verify_call(caller, callee)
+
+
+@mcp.tool()
+def verify_field(object_full_name: str, field: str) -> dict:
+    """Oracle: does `field` exist on the object (attribute or tabular-part attribute)?
+
+    Returns holds + where, or holds=false with available attribute names. Use before
+    referencing a 1C requisite you're not certain exists.
+    """
+    if not sqlite_store:
+        return {"error": "SQLite store not initialized"}
+    return sqlite_store.verify_field(object_full_name, field)
+
+
+# NOTE: `card` is an INTERNAL primitive (used to build vector-embedding cards),
+# not exposed as an agent tool — context_for covers the agent-facing need and
+# avoids menu clutter / tool-choice guessing.
+def card(symbol_name: str) -> dict:
+    """Deterministic one-line skeleton card for a symbol (zero LLM, from the graph).
+
+    Module type + owner(synonym) + what it calls + what data it touches. A compact
+    "what is this" without reading the body.
+    """
+    if not sqlite_store:
+        return {"error": "SQLite store not initialized"}
+    c = sqlite_store.card(symbol_name)
+    if c is None:
+        return {"error": f"Symbol '{symbol_name}' not found in index"}
+    return c
+
+
+def _resolve_source_path(path: str) -> Path:
+    """Resolve a tool-supplied path: absolute as-is, else relative to SOURCE_PATH."""
+    p = Path(path)
+    if p.is_absolute():
+        return p
+    return config.source_path / path
+
+
+@mcp.tool()
+def get_form_info(form_path: str) -> dict:
+    """Structure + event handlers of a managed form (Form.xml), read on demand.
+
+    Returns attributes, commands, items, declared handlers, and which handlers
+    actually exist as procedures in the form module. Use before editing a form
+    module so you know the real handler names.
+
+    Args:
+        form_path: path to Form.xml (absolute, or relative to SOURCE_PATH)
+    """
+    from .parsers.form_xml import FormXMLParser
+
+    p = _resolve_source_path(form_path)
+    if not p.exists():
+        return {"error": f"Form.xml not found: {p}"}
+    info = FormXMLParser().parse_file(p)
+    if info is None:
+        return {"error": f"Could not parse Form.xml: {p}"}
+    return info
+
+
+@mcp.tool()
+def get_skd_info(template_path: str) -> dict:
+    """Datasets / query text / fields / parameters of a DataCompositionSchema (СКД).
+
+    Returns each dataset's query, the object refs inside it (what data the report
+    reads), available fields, and schema parameters. Read on demand.
+
+    Args:
+        template_path: path to the СКД Template XML (absolute or relative to SOURCE_PATH)
+    """
+    from .parsers.skd_xml import SKDXMLParser
+
+    p = _resolve_source_path(template_path)
+    if not p.exists():
+        return {"error": f"Template not found: {p}"}
+    info = SKDXMLParser().parse_file(p)
+    if info is None:
+        return {"error": f"Not a DataCompositionSchema: {p}"}
+    return info
+
+
+# ---------------------------------------------------------------------------
 # Semantic tools — ChromaDB layer
 # ---------------------------------------------------------------------------
 
@@ -402,7 +644,17 @@ _FAST_MODE_MSG = (
 )
 
 
-@mcp.tool()
+def _tool_if(enabled: bool):
+    """Register as an MCP tool only when `enabled`; otherwise leave the function
+    unregistered so it does NOT appear in tools/list. Prevents the agent from
+    seeing/calling vector tools that are dead in fast mode (false 'not found')."""
+    return mcp.tool() if enabled else (lambda fn: fn)
+
+
+_SEMANTIC_ENABLED = config.indexing_mode == "full"
+
+
+@_tool_if(_SEMANTIC_ENABLED)
 def codesearch(query: str, limit: int = 10) -> list[dict]:
     """Search 1C BSL code semantically.
 
@@ -433,7 +685,7 @@ def codesearch(query: str, limit: int = 10) -> list[dict]:
     ]
 
 
-@mcp.tool()
+@_tool_if(_SEMANTIC_ENABLED)
 def helpsearch(query: str, limit: int = 10) -> list[dict]:
     """Search 1C documentation.
 
@@ -461,7 +713,7 @@ def helpsearch(query: str, limit: int = 10) -> list[dict]:
     ]
 
 
-@mcp.tool()
+@_tool_if(_SEMANTIC_ENABLED)
 def search_code_filtered(
     query: str,
     module_type: str | None = None,
@@ -512,7 +764,7 @@ def search_code_filtered(
 
 
 @mcp.tool()
-def code_grep(pattern: str, case_sensitive: bool = False, limit: int = 20) -> list[dict]:
+def code_grep(pattern: str, case_sensitive: bool = False, limit: int = 100) -> list[dict]:
     """Search for text pattern in BSL code with AST context.
 
     Unlike regular grep, returns matches with structural context:
@@ -524,7 +776,10 @@ def code_grep(pattern: str, case_sensitive: bool = False, limit: int = 20) -> li
     Args:
         pattern: Text pattern to search (substring match, not regex)
         case_sensitive: Whether search is case-sensitive (default: False)
-        limit: Maximum results to return (default: 20)
+        limit: Maximum results to return (default: 100). When the result count
+            reaches `limit`, output is TRUNCATED and a final {"_truncated": true}
+            element is appended — narrow the pattern or raise `limit` to see the
+            rest. Do NOT conclude "only N matches exist" when truncated.
 
     Returns: List of matches with fields:
         - file: relative path to .bsl file
@@ -534,23 +789,32 @@ def code_grep(pattern: str, case_sensitive: bool = False, limit: int = 20) -> li
         - module_type: type of module (ObjectModule, ManagerModule, etc.)
         - context: 2 lines before + 2 lines after the match
     """
+    results = None
     # Fast path: FTS5 index (instant)
     if sqlite_store and sqlite_store.has_code_fts():
         results = sqlite_store.code_grep(pattern, case_sensitive=case_sensitive, limit=limit)
-        if results is not None:
-            return results
 
-    # Fallback: file scanning (slow, used when index not yet built)
-    source = config.source_path
-    if not source.exists():
-        return [{"error": f"SOURCE_PATH does not exist: {source}"}]
+    if results is None:
+        # Fallback: file scanning (slow, used when index not yet built)
+        source = config.source_path
+        if not source.exists():
+            return [{"error": f"SOURCE_PATH does not exist: {source}"}]
+        results = _code_grep.search(
+            pattern=pattern,
+            source_path=source,
+            case_sensitive=case_sensitive,
+            limit=limit,
+        )
 
-    return _code_grep.search(
-        pattern=pattern,
-        source_path=source,
-        case_sensitive=case_sensitive,
-        limit=limit,
-    )
+    # Truncation signal: when full, the agent must NOT assume this is the whole set.
+    if len(results) >= limit:
+        results = results + [{
+            "_truncated": True,
+            "shown": len(results),
+            "hint": f"Показаны первые {len(results)} совпадений (лимит достигнут). "
+                    f"Сузь паттерн/добавь контекст или подними limit — это НЕ все совпадения.",
+        }]
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -559,6 +823,23 @@ def code_grep(pattern: str, case_sensitive: bool = False, limit: int = 20) -> li
 
 
 @mcp.tool()
+def reindex_changed() -> dict:
+    """Pick up edited/added/deleted .bsl files since the last index — fast.
+
+    Scans the source tree, detects files whose content changed (mtime/size
+    prefilter + hash confirm), re-indexes ONLY those into the SQLite graph
+    (symbols, call edges with qualifier resolution), and drops vanished files.
+    Use this after editing 1C code so the index reflects your changes in seconds
+    instead of a full rebuild.
+
+    Returns:
+        Counts of changed/deleted files plus current SQLite + edge statistics.
+    """
+    return _reindex_changed()
+
+
+# Admin-only foot-gun (full rebuild) — unregistered from the agent menu. Use the CLI /
+# container restart for a full rebuild; agents use reindex_changed (incremental).
 def reindex(rebuild_sqlite: bool = True, force_chromadb: bool = False) -> dict:
     """Re-index the 1C codebase.
 
@@ -613,6 +894,7 @@ def stats() -> dict:
             "objects": s.objects,
             "attributes": s.attributes,
         }
+        result["edges"] = sqlite_store.count_edges()
 
     result["indexing_mode"] = config.indexing_mode
 
@@ -686,15 +968,11 @@ async def reindex_endpoint(request):
                     indexer.index_directory(sqlite_enabled=sqlite_has_data)
                 logger.info(f"Background full reindex completed (provider: {config.reindex_provider})")
             else:
-                logger.info("Starting background INCREMENTAL reindex (force=false, local provider)...")
-                if sqlite_store:
-                    _rebuild_sqlite()
-                if indexer:
-                    _swap_to_reindex_provider()
-                    # No clear_all() — file_tracker skips unchanged files
-                    sqlite_has_data = sqlite_store.has_data() if sqlite_store else False
-                    indexer.index_directory(sqlite_enabled=sqlite_has_data)
-                logger.info("Background incremental reindex completed")
+                logger.info("Starting background INCREMENTAL reindex (force=false, changed-files only)...")
+                # Changed-file detector → update() only those (SQLite graph),
+                # plus a best-effort vector delta. No full rebuild.
+                res = _reindex_changed()
+                logger.info(f"Background incremental reindex completed: {res}")
         except Exception as e:
             logger.error(f"Background reindex failed: {e}", exc_info=True)
 

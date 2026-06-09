@@ -33,3 +33,11 @@ chroma_db/
 # OS
 .DS_Store
 Thumbs.db
+
+# Large regenerable caches/dumps (never version — bloat)
+*.sqlite
+*.sqlite-*
+cards_full.json
+cards_new.json
+*.json.gz
+emb_cache.sqlite
